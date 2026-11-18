@@ -31,6 +31,25 @@ public interface Feature {
     }
 
     /**
+     * True when this feature decides what its own key does, instead of being toggled by it.
+     *
+     * Needed because Shift+I must mean something different from I. The alternative — a
+     * toggle on every press — makes the control screen unusable, since opening it would arm
+     * the tool.
+     */
+    default boolean handlesKeyItself() {
+        return false;
+    }
+
+    /**
+     * Called on a press of this feature's key, only when {@link #handlesKeyItself()}.
+     *
+     * @param shift whether either Shift was held, so one key can carry two meanings.
+     */
+    default void onKeyPressed(boolean shift) {
+    }
+
+    /**
      * Called once per client tick, while the feature is enabled.
      *
      * Not a render hook: this is where a feature reacts to state that changes between

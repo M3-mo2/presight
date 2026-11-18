@@ -95,7 +95,20 @@ public final class Keybinds {
             if (Keyboard.isKeyDown(code)) {
                 heldNow.add(code);
                 if (!HELD_LAST_TICK.contains(code)) {
-                    toggle(e.getValue());
+                    Feature f = e.getValue();
+                    if (f.handlesKeyItself()) {
+                        // Let the feature see Shift: one key, two meanings, and the decision
+                        // stays with the feature that knows what the two meanings are.
+                        boolean shift = Keyboard.isKeyDown(Keyboard.KEY_LSHIFT)
+                                || Keyboard.isKeyDown(Keyboard.KEY_RSHIFT);
+                        try {
+                            f.onKeyPressed(shift);
+                        } catch (Throwable t) {
+                            System.err.println("[PreSight] key '" + f.id() + "' threw: " + t);
+                        }
+                    } else {
+                        toggle(f);
+                    }
                 }
             }
         }

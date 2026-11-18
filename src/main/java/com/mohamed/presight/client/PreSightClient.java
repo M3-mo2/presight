@@ -47,6 +47,7 @@ public final class PreSightClient {
         // Registered here and nowhere else: the keybinding, the config entry and the tick
         // loop all read the registry, so a new tool is one line.
         FeatureRegistry.register(new com.mohamed.presight.safety.BuildAssistantFeature());
+        FeatureRegistry.register(new com.mohamed.presight.click.ClickMultiplierFeature());
         Keybinds.registerAll();
         // After registration: the stored state and keys are applied onto the features and
         // bindings that now exist.
