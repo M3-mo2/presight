@@ -160,8 +160,8 @@ public class GearViewFeature implements Feature {
             RenderHelper.disableStandardItemLighting();
             GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
         } finally {
-            // Restores what the item renderer and the rects disturbed. A leak here is
-            // what leaves the whole HUD tinted or textureless.
+            // Unconditional, even on the exception path: a matrix left on the stack is
+            // cumulative and ends in GL_STACK_OVERFLOW a few frames later.
             Draw.endGui();
         }
     }

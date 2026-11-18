@@ -25,7 +25,32 @@ import org.lwjgl.opengl.GL11;
  */
 public final class Draw {
 
+    /**
+     * How many matrices this mod has pushed and not yet popped.
+     *
+     * The legacy stack is 32 deep. A draw that throws between its push and its pop
+     * leaves one behind permanently, every frame adds another, and after 32 frames the
+     * driver reports GL_STACK_OVERFLOW (1283) — an error whose message says nothing
+     * about the code that caused it. Counting them here is what makes it recoverable.
+     */
+    private static int depth;
+
     private Draw() {
+    }
+
+    /** Push a matrix, remembered so it can be unwound if the draw throws. */
+    private static void push() {
+        push();
+        depth++;
+    }
+
+    /** Pop a matrix, but never below the level we started at. */
+    private static void pop() {
+        if (depth <= 0) {
+            return;
+        }
+        pop();
+        depth--;
     }
 
     // ---------------------------------------------------------------- world space
@@ -34,7 +59,7 @@ public final class Draw {
     public static void box(double x1, double y1, double z1,
                            double x2, double y2, double z2,
                            float r, float g, float b, float a, float width) {
-        GlStateManager.pushMatrix();
+        push();
         GlStateManager.disableTexture2D();
         GlStateManager.disableLighting();
         GlStateManager.disableCull();
@@ -77,7 +102,7 @@ public final class Draw {
         GlStateManager.enableLighting();
         GlStateManager.enableTexture2D();
         GlStateManager.disableBlend();
-        GlStateManager.popMatrix();
+        pop();
     }
 
     private static void edge(WorldRenderer wr, double x1, double y1, double z1,
@@ -94,7 +119,7 @@ public final class Draw {
         if (font == null || text == null || text.isEmpty()) {
             return;
         }
-        GlStateManager.pushMatrix();
+        push();
         GlStateManager.translate(x, y, z);
         // Billboard on both axes, or the text lies flat on the ground and is unreadable
         // unless you happen to be directly above it.
@@ -114,7 +139,7 @@ public final class Draw {
         GlStateManager.depthMask(true);
         GlStateManager.enableDepth();
         GlStateManager.disableBlend();
-        GlStateManager.popMatrix();
+        pop();
     }
 
     // ------------------------------------------------------------- screen space
@@ -126,7 +151,7 @@ public final class Draw {
      * this only has to fix the states the drawing below will disturb.
      */
     public static void beginGui() {
-        GlStateManager.pushMatrix();
+        push();
         GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
         GlStateManager.enableBlend();
         GlStateManager.tryBlendFuncSeparate(
@@ -141,7 +166,7 @@ public final class Draw {
         GlStateManager.enableDepth();
         GlStateManager.disableBlend();
         GlStateManager.enableTexture2D();
-        GlStateManager.popMatrix();
+        pop();
     }
 
     /** A filled rectangle in scaled-screen pixels. Call inside beginGui/endGui. */
@@ -181,6 +206,12 @@ public final class Draw {
      */
     public static void forceSaneState() {
         try {
+            // Unwind first: a draw that threw skipped its own pop, and leaving the stack
+            // deeper than it started makes the overflow permanent and progressive.
+            while (depth > 0) {
+                GlStateManager.popMatrix();
+                depth--;
+            }
             GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
             GlStateManager.depthMask(true);
             GlStateManager.enableDepth();
