@@ -130,36 +130,41 @@ public class GearViewFeature implements Feature {
 
     @Override
     public void renderScreen(ScreenContext ctx) {
-        if (screenX < 0 || icons == null || icons.length == 0) {
+        if (screenX < 0 || name == null) {
             return;
         }
 
-        {
-            ctx.rect(screenX, screenY, panelW, panelH, BG);
-            ctx.outline(screenX, screenY, panelW, panelH, BORDER);
+        // The panel is drawn even when the player is carrying nothing: "no gear" is a
+        // real answer, and an invisible panel reads as the feature being broken. Only
+        // the icon row is skipped.
+        ctx.rect(screenX, screenY, panelW, panelH, BG);
+        ctx.outline(screenX, screenY, panelW, panelH, BORDER);
+        ctx.text(name, screenX + PAD, screenY + PAD, LABEL);
 
-            FontRenderer font = ctx.font;
-            if (name != null) {
-                font.drawStringWithShadow(name, screenX + PAD, screenY + PAD, LABEL);
-            }
-
-            // The game's own item renderer, so a diamond sword looks like a diamond sword
-            // and a stack of 64 shows its count — the same call the inventory makes.
-            RenderHelper.enableGUIStandardItemLighting();
-            RenderItem ri = Minecraft.getMinecraft().getRenderItem();
-            int ix = screenX + PAD;
-            int iy = screenY + PAD + 10;
-            for (ItemStack stack : icons) {
-                if (stack == null) {
-                    continue;
-                }
-                ri.renderItemAndEffectIntoGUI(stack, ix, iy);
-                ri.renderItemOverlayIntoGUI(font, stack, ix, iy, null);
-                ix += CELL;
-            }
-            RenderHelper.disableStandardItemLighting();
-            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+        if (icons == null || icons.length == 0) {
+            return;
         }
+
+        // The game's own item renderer, so a diamond sword looks like a diamond sword and
+        // a stack of 64 shows its count — the same call the inventory makes.
+        RenderHelper.enableGUIStandardItemLighting();
+        RenderItem ri = Minecraft.getMinecraft().getRenderItem();
+        int ix = screenX + PAD;
+        int iy = screenY + PAD + 10;
+        for (ItemStack stack : icons) {
+            if (stack == null) {
+                continue;
+            }
+            ri.renderItemAndEffectIntoGUI(stack, ix, iy);
+            ri.renderItemOverlayIntoGUI(fontOf(), stack, ix, iy, null);
+            ix += CELL;
+        }
+        RenderHelper.disableStandardItemLighting();
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+    }
+
+    private static FontRenderer fontOf() {
+        return Minecraft.getMinecraft().fontRendererObj;
     }
 
     // -------------------------------------------------------------------- target
