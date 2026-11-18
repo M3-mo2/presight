@@ -42,12 +42,9 @@ public class GearViewFeature implements Feature {
     // card is as small as the icons allow rather than padded for its own sake.
     private static final int CELL = 16;
     private static final int PAD = 2;
-    /** One line of the default font. */
-    private static final int LINE = 9;
     private static final int MIN_COLS = 2;   // stops the panel collapsing when empty
     private static final int BG = 0xC8101014;
     private static final int BORDER = 0xFF3CD07A;
-    private static final int LABEL = 0xFF9BFF6B;
     private static final int MUTED = 0xFF808080;
 
     /** Re-run the expensive scan at most this often, in client ticks. */
@@ -228,7 +225,9 @@ public class GearViewFeature implements Feature {
 
         int cols = Math.max(MIN_COLS, items.size());
         panelW = PAD * 2 + cols * CELL;
-        panelH = PAD * 2 + LINE + CELL;
+        // No name row: the icons are the content, and a name row made the card taller for
+        // text that duplicates the nameplate Minecraft already draws above the player.
+        panelH = PAD * 2 + CELL;
 
         int guiW = mc.displayWidth / scaleFactor;
         int guiH = mc.displayHeight / scaleFactor;
@@ -314,10 +313,11 @@ public class GearViewFeature implements Feature {
         // invisible panel reads as the feature being broken.
         ctx.rect(screenX, screenY, panelW, panelH, BG);
         ctx.outline(screenX, screenY, panelW, panelH, BORDER);
-        ctx.text(name, screenX + PAD, screenY + PAD, LABEL);
 
         if (icons == null || icons.length == 0) {
-            ctx.text("no gear", screenX + PAD, screenY + PAD + LINE, MUTED);
+            // "no gear" stays: an empty frame with no explanation reads as a broken card
+            // rather than as an accurate "carrying nothing".
+            ctx.textCentred("no gear", screenX + panelW / 2, screenY + PAD + 4, MUTED);
             return;
         }
 
@@ -326,7 +326,7 @@ public class GearViewFeature implements Feature {
         RenderHelper.enableGUIStandardItemLighting();
         RenderItem ri = Minecraft.getMinecraft().getRenderItem();
         int ix = screenX + PAD;
-        int iy = screenY + PAD + LINE;
+        int iy = screenY + PAD;
         for (ItemStack stack : icons) {
             if (stack == null) {
                 continue;
