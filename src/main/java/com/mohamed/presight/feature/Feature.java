@@ -36,6 +36,20 @@ public interface Feature {
     default void renderWorld(com.mohamed.presight.render.RenderContext ctx) {
     }
 
+    /**
+     * World-space measuring that must not run while the line batch is open.
+     *
+     * 1282 GL_INVALID_OPERATION means a state call was made between glBegin and glEnd,
+     * and `glGetFloat` is a state call: reading the modelview/projection matrices to
+     * project a world point onto the screen is illegal inside a primitive. Doing it in
+     * `renderWorld` produced that error on every frame for every player.
+     *
+     * So the batch closes first, this runs with the world matrices still current, and
+     * only then does the HUD pass draw using what this computed.
+     */
+    default void measureWorld(com.mohamed.presight.render.RenderContext ctx) {
+    }
+
     /** Draw on the HUD, in screen coordinates. */
     default void renderScreen(com.mohamed.presight.render.ScreenContext ctx) {
     }

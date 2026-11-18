@@ -1,6 +1,7 @@
 package com.mohamed.presight.gear;
 
 import com.mohamed.presight.feature.Feature;
+import com.mohamed.presight.feature.FeatureRegistry;
 import com.mohamed.presight.render.Projection;
 import com.mohamed.presight.render.RenderContext;
 import com.mohamed.presight.render.ScreenContext;
@@ -17,6 +18,7 @@ import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import org.lwjgl.input.Keyboard;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -48,6 +50,9 @@ public class GearViewFeature implements Feature {
     /** Re-run the expensive scan at most this often, in client ticks. */
     private static final int SCAN_INTERVAL = 6;
 
+    /** One scan diagnostic per session; enough to answer "why no panel". */
+    private static boolean loggedScan;
+
     /** Panel placement, computed in the world pass and read by the HUD pass. */
     private int screenX = -1;
     private int screenY = -1;
@@ -55,6 +60,20 @@ public class GearViewFeature implements Feature {
     private int panelH;
     private String name;
     private ItemStack[] icons;
+
+    /** Carried from renderWorld to measureWorld, so the batch can close first. */
+    /** Counts frames with no target, so the log line is occasional not spammy. */
+    private int framesWithoutTarget;
+
+    private String lastLoggedName;
+
+    private EntityPlayer pendingTarget;
+    private List<ItemStack> pendingItems;
+
+    /** Exposed so the HUD status line can say what the panel is tracking. */
+    public String targetName() {
+        return name;
+    }
 
     /** Cached scan result and the tick it was taken. */
     private EntityPlayer cachedTarget;
@@ -83,6 +102,8 @@ public class GearViewFeature implements Feature {
             name = null;
             icons = null;
             cachedTarget = null;
+            pendingTarget = null;
+            pendingItems = null;
         }
     }
 
@@ -109,8 +130,44 @@ public class GearViewFeature implements Feature {
 
         GearSnapshot gear = GearSnapshot.of(target);
         List<ItemStack> items = gear.presentItems();
+        this.pendingTarget = target;
+        this.pendingItems = items;
+    }
 
-        // Projected here, while the world matrices are current.
+    /**
+     * The projection, run after the line batch has closed.
+     *
+     * `Projection.worldToScreen` calls glGetFloat for the modelview and projection
+     * matrices, and glGet* between glBegin and glEnd is GL_INVALID_OPERATION (1282) — the
+     * error the owner reported on every frame. Doing it here keeps the ordering honest
+     * instead of hoping nobody reads GL state while a primitive is open.
+     */
+    @Override
+    public void measureWorld(RenderContext ctx) {
+        EntityPlayer target = pendingTarget;
+        if (target == null || !FeatureRegistry.isEnabled(ID)) {
+            if (framesWithoutTarget++ % 200 == 0) {
+                // Said out loud because "no panel" has two very different causes: the
+                // crosshair is not on a player, or the projection failed. Without this
+                // line they are the same observation, and they need opposite fixes.
+                // The eye/look pair is printed so the aim can be reproduced exactly
+                // instead of hunted for by hand.
+                Minecraft mc0 = Minecraft.getMinecraft();
+                String aim = "";
+                if (mc0.thePlayer != null) {
+                    net.minecraft.util.Vec3 e = mc0.thePlayer.getPositionEyes(1.0F);
+                    net.minecraft.util.Vec3 l = mc0.thePlayer.getLook(1.0F);
+                    aim = String.format(" eye=%.1f,%.1f,%.1f look=%.2f,%.2f,%.2f",
+                            e.xCoord, e.yCoord, e.zCoord, l.xCoord, l.yCoord, l.zCoord);
+                }
+                System.out.println("[PreSight] gear: no target under the crosshair" + aim);
+            }
+            screenX = -1;
+            return;
+        }
+        List<ItemStack> items = pendingItems == null ? new ArrayList<ItemStack>() : pendingItems;
+
+        Minecraft mc = Minecraft.getMinecraft();
         ScaledResolution res = new ScaledResolution(mc);
         double[] screen = Projection.worldToScreen(
                 ctx.relX(target), ctx.relY(target) + target.height + 0.35D, ctx.relZ(target),
@@ -130,8 +187,17 @@ public class GearViewFeature implements Feature {
         screenX = Math.max(2, Math.min(px, res.getScaledWidth() - panelW - 2));
         screenY = Math.max(2, Math.min(py, res.getScaledHeight() - panelH - 2));
 
-        name = gear.playerName;
+        name = target.getName();
         icons = items.toArray(new ItemStack[0]);
+
+        if (!name.equals(lastLoggedName)) {
+            lastLoggedName = name;
+            // The one line that separates "the panel is placed wrongly" from "the panel
+            // was never placed": it names the target, the panel rectangle, and the items.
+            System.out.println("[PreSight] gear: panel for " + name
+                    + " at (" + screenX + "," + screenY + ") " + panelW + "x" + panelH
+                    + " items=" + icons.length);
+        }
     }
 
     // ------------------------------------------------------------------- HUD pass
@@ -228,10 +294,12 @@ public class GearViewFeature implements Feature {
 
         EntityPlayer best = null;
         double bestDist = Double.MAX_VALUE;
+        int candidates = 0;
         for (Object o : mc.theWorld.getEntitiesWithinAABB(EntityPlayer.class, area)) {
             if (!(o instanceof EntityPlayer) || o == mc.thePlayer) {
                 continue;
             }
+            candidates++;
             EntityPlayer p = (EntityPlayer) o;
             AxisAlignedBB bb = p.getEntityBoundingBox().expand(0.3D, 0.3D, 0.3D);
             MovingObjectPosition mop = bb.calculateIntercept(eye, end);
@@ -243,6 +311,19 @@ public class GearViewFeature implements Feature {
                 bestDist = d;
                 best = p;
             }
+        }
+        if (!loggedScan) {
+            loggedScan = true;
+            // Names the two possible failures, which look identical on screen: no player
+            // inside the ray's bounding box at all, or players there whose hitbox the ray
+            // missed. Those need different fixes, so the log says which one happened.
+            System.out.println("[PreSight] gear scan: inWorld=" + mc.theWorld.playerEntities.size()
+                    + " inRayBox=" + candidates
+                    + " intercepted=" + (best != null)
+                    + " eye=" + String.format("%.1f,%.1f,%.1f",
+                        eye.xCoord, eye.yCoord, eye.zCoord)
+                    + " look=" + String.format("%.2f,%.2f,%.2f",
+                        look.xCoord, look.yCoord, look.zCoord));
         }
         return best;
     }

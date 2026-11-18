@@ -1,5 +1,6 @@
 package com.mohamed.presight.client;
 
+import org.lwjgl.opengl.GL11;
 import com.mohamed.presight.feature.Feature;
 import com.mohamed.presight.feature.FeatureRegistry;
 import com.mohamed.presight.render.BoxBatch;
@@ -80,11 +81,29 @@ public class WorldRenderHandler {
                 }
             }
         } finally {
-            // Order matters: the line batch closes first, because text has to change GL
-            // state and none of that is legal between glBegin and glEnd.
+            // Order matters, and this order is the fix for GL 1282.
+            //
+            // `Projection.worldToScreen` reads the modelview and projection matrices with
+            // glGetFloat, and glGet* is a state call: making one between glBegin and glEnd
+            // is GL_INVALID_OPERATION. Running it inside the feature loop — while the line
+            // batch is open — produced 1282 on every frame for every player, which is what
+            // the owner saw. So the batch closes, the projection runs against the still-live
+            // world matrices, and only then is anything drawn.
             boxes.flush();
+            for (Feature f : FeatureRegistry.all()) {
+                if (!FeatureRegistry.isEnabled(f.id())) {
+                    continue;
+                }
+                try {
+                    f.measureWorld(ctx);
+                } catch (Throwable t) {
+                    System.err.println("[PreSight] measure '" + f.id() + "' threw:");
+                    t.printStackTrace();
+                }
+            }
             texts.draw(ctx);
         }
+        reportGlErrorsOnce();
     }
 
     private static String enabledList() {
@@ -98,5 +117,28 @@ public class WorldRenderHandler {
             }
         }
         return sb.length() == 0 ? "none" : sb.toString();
+    }
+
+    /**
+     * Report a GL error once, naming the pass it came from.
+     *
+     * The owner's report was "OpenGL error 1282" with no location, and finding it meant
+     * reading four classes to see which call writes GL state between glBegin and glEnd.
+     * One probe per frame costs a synchronous round trip to the driver, which is affordable
+     * exactly because it only runs while a GL error is being hunted.
+     */
+    private static boolean glReported = false;
+
+    private static void reportGlErrorsOnce() {
+        if (glReported) {
+            return;
+        }
+        int err = GL11.glGetError();
+        if (err == GL11.GL_NO_ERROR) {
+            return;
+        }
+        glReported = true;
+        System.err.println("[PreSight] GL error " + err + " after the world pass"
+                + " (1282 = a state call between glBegin/glEnd, 1283 = unbalanced matrix push)");
     }
 }
