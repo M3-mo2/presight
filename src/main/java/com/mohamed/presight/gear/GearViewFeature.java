@@ -38,8 +38,12 @@ public class GearViewFeature implements Feature {
 
     public static final String ID = "gear_view";
 
-    private static final int CELL = 18;      // icon cell, the same 18px the inventory uses
-    private static final int PAD = 4;
+    // 16 is the smallest cell that still fits a 16x16 item icon without clipping, so the
+    // card is as small as the icons allow rather than padded for its own sake.
+    private static final int CELL = 16;
+    private static final int PAD = 2;
+    /** One line of the default font. */
+    private static final int LINE = 9;
     private static final int MIN_COLS = 2;   // stops the panel collapsing when empty
     private static final int BG = 0xC8101014;
     private static final int BORDER = 0xFF3CD07A;
@@ -51,6 +55,18 @@ public class GearViewFeature implements Feature {
 
     /** How far away a player can be and still get a panel, in blocks. */
     private static final double PANEL_RANGE = 32.0D;
+
+    /**
+     * A jump larger than this in one frame is a teleport, not walking.
+     *
+     * Without it the card follows a player who blinked across the map: it renders for a
+     * frame at a position that has nothing to do with anything visible, which reads as a
+     * ghost panel. A sprint is under 0.4 blocks a tick, so 8 leaves plenty of room.
+     */
+    private static final double TELEPORT_JUMP = 8.0D;
+
+    /** How long the card stays hidden after a teleport, in client ticks (2 s). */
+    private static final int TELEPORT_GRACE_TICKS = 40;
 
     /** One scan diagnostic per session; enough to answer "why no panel". */
     private static boolean loggedScan;
@@ -80,6 +96,12 @@ public class GearViewFeature implements Feature {
     /** Cached scan result and the tick it was taken. */
     private EntityPlayer cachedTarget;
     private int lastScanTick;
+
+    /** Where the subject was last frame, for teleport detection. */
+    private Vec3 lastSeenPosition;
+
+    /** Tick until which the card stays hidden after a teleport. */
+    private int suppressUntilTick;
 
     @Override
     public String id() {
@@ -119,8 +141,8 @@ public class GearViewFeature implements Feature {
         }
 
         EntityPlayer target = pickTarget(mc);
-        if (target == null || target.isDead) {
-            screenX = -1;
+        if (target == null || !isPanelSubjectValid(mc, target)) {
+            clearCard();
             return;
         }
 
@@ -171,7 +193,7 @@ public class GearViewFeature implements Feature {
                 }
                 System.out.println("[PreSight] gear: no target under the crosshair" + aim);
             }
-            screenX = -1;
+            clearCard();
             return;
         }
         List<ItemStack> items = pendingItems == null ? new ArrayList<ItemStack>() : pendingItems;
@@ -206,7 +228,7 @@ public class GearViewFeature implements Feature {
 
         int cols = Math.max(MIN_COLS, items.size());
         panelW = PAD * 2 + cols * CELL;
-        panelH = PAD * 2 + 11 + CELL;
+        panelH = PAD * 2 + LINE + CELL;
 
         int guiW = mc.displayWidth / scaleFactor;
         int guiH = mc.displayHeight / scaleFactor;
@@ -228,6 +250,58 @@ public class GearViewFeature implements Feature {
         }
     }
 
+    /**
+     * Whether the card should exist at all this frame.
+     *
+     * The owner asked for it to disappear when the player dies or teleports, and the reason
+     * is the same in both cases: the card points at a place. A corpse and a player who
+     * blinked away are both "nothing to point at", and a card hanging over empty ground
+     * reads as a bug — worse than no card.
+     *
+     * After a teleport the card stays hidden for a short grace period rather than
+     * reappearing on the very next frame at the destination, because a panel that jumps
+     * across the screen along with the player is the same ghost one frame later.
+     */
+    private boolean isPanelSubjectValid(Minecraft mc, EntityPlayer target) {
+        if (target.isDead || target.getHealth() <= 0.0F) {
+            lastSeenPosition = null;
+            return false;
+        }
+        // Removed from the world entirely (left, died and despawned, changed dimension).
+        if (!mc.theWorld.playerEntities.contains(target)) {
+            lastSeenPosition = null;
+            return false;
+        }
+
+        Vec3 now = new Vec3(target.posX, target.posY, target.posZ);
+        if (lastSeenPosition != null) {
+            double jump = now.distanceTo(lastSeenPosition);
+            if (jump > TELEPORT_JUMP) {
+                // Hide, and remember the new place so the grace period is only entered once.
+                suppressUntilTick = mc.thePlayer.ticksExisted + TELEPORT_GRACE_TICKS;
+                cachedTarget = null;
+                lastSeenPosition = now;
+                return false;
+            }
+        }
+        lastSeenPosition = now;
+
+        if (mc.thePlayer.ticksExisted < suppressUntilTick) {
+            return false;
+        }
+        return true;
+    }
+
+    /** Drop everything the HUD pass reads, so nothing is drawn from stale state. */
+    private void clearCard() {
+        screenX = -1;
+        screenY = -1;
+        name = null;
+        icons = null;
+        pendingTarget = null;
+        pendingItems = null;
+    }
+
     // ------------------------------------------------------------------- HUD pass
 
     @Override
@@ -243,7 +317,7 @@ public class GearViewFeature implements Feature {
         ctx.text(name, screenX + PAD, screenY + PAD, LABEL);
 
         if (icons == null || icons.length == 0) {
-            ctx.text("no gear", screenX + PAD, screenY + PAD + 11, MUTED);
+            ctx.text("no gear", screenX + PAD, screenY + PAD + LINE, MUTED);
             return;
         }
 
@@ -252,7 +326,7 @@ public class GearViewFeature implements Feature {
         RenderHelper.enableGUIStandardItemLighting();
         RenderItem ri = Minecraft.getMinecraft().getRenderItem();
         int ix = screenX + PAD;
-        int iy = screenY + PAD + 11;
+        int iy = screenY + PAD + LINE;
         for (ItemStack stack : icons) {
             if (stack == null) {
                 continue;
