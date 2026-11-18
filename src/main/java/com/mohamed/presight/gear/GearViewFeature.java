@@ -7,7 +7,6 @@ import com.mohamed.presight.render.RenderContext;
 import com.mohamed.presight.render.ScreenContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
-import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.RenderHelper;
 import net.minecraft.client.renderer.entity.RenderItem;
@@ -49,6 +48,9 @@ public class GearViewFeature implements Feature {
 
     /** Re-run the expensive scan at most this often, in client ticks. */
     private static final int SCAN_INTERVAL = 6;
+
+    /** How far away a player can be and still get a panel, in blocks. */
+    private static final double PANEL_RANGE = 32.0D;
 
     /** One scan diagnostic per session; enough to answer "why no panel". */
     private static boolean loggedScan;
@@ -145,6 +147,13 @@ public class GearViewFeature implements Feature {
     @Override
     public void measureWorld(RenderContext ctx) {
         EntityPlayer target = pendingTarget;
+        if (framesWithoutTarget == 0) {
+            // Unconditional proof that this hook runs at all: an empty log after this line
+            // means the handler never reached the measure phase, which is a different bug
+            // from a null target.
+            System.out.println("[PreSight] gear: measureWorld entered, pending="
+                    + (target == null ? "null" : target.getName()));
+        }
         if (target == null || !FeatureRegistry.isEnabled(ID)) {
             if (framesWithoutTarget++ % 200 == 0) {
                 // Said out loud because "no panel" has two very different causes: the
@@ -168,24 +177,43 @@ public class GearViewFeature implements Feature {
         List<ItemStack> items = pendingItems == null ? new ArrayList<ItemStack>() : pendingItems;
 
         Minecraft mc = Minecraft.getMinecraft();
-        ScaledResolution res = new ScaledResolution(mc);
+        // No ScaledResolution at all. Its (Minecraft) constructor is absent from 1.8's SRG
+        // map — it is a 1.8.9 addition — so the call survived the remap under its readable
+        // name and threw NoSuchMethodError inside the render loop on the version the owner
+        // plays. That is why the panel never appeared even with the crosshair on a player.
+        //
+        // gluProject already returns framebuffer pixels, so the result is stored in those
+        // and converted to GUI pixels by the HUD pass, which knows the scaled size.
         double[] screen = Projection.worldToScreen(
                 ctx.relX(target), ctx.relY(target) + target.height + 0.35D, ctx.relZ(target),
-                res.getScaledWidth(), res.getScaledHeight());
+                mc.displayWidth, mc.displayHeight);
 
         if (screen == null) {
             screenX = -1;   // behind the camera
             return;
         }
 
+        // Convert framebuffer pixels to the coordinates Gui.drawRect uses.
+        int guiScale = mc.gameSettings.guiScale;
+        if (guiScale == 0) {
+            guiScale = 1000;   // "auto"
+        }
+        int scaleFactor = 1;
+        while (scaleFactor < guiScale && mc.displayWidth / (scaleFactor + 1) >= 320
+                && mc.displayHeight / (scaleFactor + 1) >= 240) {
+            scaleFactor++;
+        }
+
         int cols = Math.max(MIN_COLS, items.size());
         panelW = PAD * 2 + cols * CELL;
         panelH = PAD * 2 + 11 + CELL;
 
-        int px = (int) screen[0] - panelW / 2;
-        int py = (int) screen[1] - panelH - 6;
-        screenX = Math.max(2, Math.min(px, res.getScaledWidth() - panelW - 2));
-        screenY = Math.max(2, Math.min(py, res.getScaledHeight() - panelH - 2));
+        int guiW = mc.displayWidth / scaleFactor;
+        int guiH = mc.displayHeight / scaleFactor;
+        int px = (int) (screen[0] / scaleFactor) - panelW / 2;
+        int py = (int) (screen[1] / scaleFactor) - panelH - 6;
+        screenX = Math.max(2, Math.min(px, guiW - panelW - 2));
+        screenY = Math.max(2, Math.min(py, guiH - panelH - 2));
 
         name = target.getName();
         icons = items.toArray(new ItemStack[0]);
@@ -276,50 +304,67 @@ public class GearViewFeature implements Feature {
         return cachedTarget;
     }
 
-    /** The throttled path: the nearest player whose hitbox the view ray crosses. */
+    /**
+     * The player whose gear to show: whatever the crosshair is on, otherwise the nearest one.
+     *
+     * Requiring the crosshair to be exactly on a player made the feature look dead: the
+     * owner pressed Y, the chat said ON, and no panel appeared — because a 0.8-block-wide
+     * hitbox is a hard thing to land on with a mouse. Worse, the ask was explicitly "even
+     * the far ones", so aiming precision was never the requirement.
+     *
+     * So: precise aim wins when it exists, and otherwise the nearest player within
+     * PANEL_RANGE gets the panel — the one the ESP box already makes obvious.
+     */
     private static EntityPlayer scanForTarget(Minecraft mc) {
         Vec3 eye = mc.thePlayer.getPositionEyes(1.0F);
         Vec3 look = mc.thePlayer.getLook(1.0F);
         Vec3 end = eye.addVector(look.xCoord * 32.0D, look.yCoord * 32.0D, look.zCoord * 32.0D);
 
-        // A tight box around the ray segment, rather than a 48-block cube: fewer candidates
-        // to test, and no box built for entities nowhere near the crosshair.
-        AxisAlignedBB area = new AxisAlignedBB(
-                Math.min(eye.xCoord, end.xCoord) - 2.0D,
-                Math.min(eye.yCoord, end.yCoord) - 2.0D,
-                Math.min(eye.zCoord, end.zCoord) - 2.0D,
-                Math.max(eye.xCoord, end.xCoord) + 2.0D,
-                Math.max(eye.yCoord, end.yCoord) + 2.0D,
-                Math.max(eye.zCoord, end.zCoord) + 2.0D);
+        // Players inside the panel range, regardless of where the camera points.
+        AxisAlignedBB wide = mc.thePlayer.getEntityBoundingBox().expand(
+                PANEL_RANGE, PANEL_RANGE, PANEL_RANGE);
 
-        EntityPlayer best = null;
-        double bestDist = Double.MAX_VALUE;
-        int candidates = 0;
-        for (Object o : mc.theWorld.getEntitiesWithinAABB(EntityPlayer.class, area)) {
+        EntityPlayer aimed = null;
+        double aimedDist = Double.MAX_VALUE;
+        EntityPlayer nearest = null;
+        double nearestDist = Double.MAX_VALUE;
+
+        for (Object o : mc.theWorld.getEntitiesWithinAABB(EntityPlayer.class, wide)) {
             if (!(o instanceof EntityPlayer) || o == mc.thePlayer) {
                 continue;
             }
-            candidates++;
             EntityPlayer p = (EntityPlayer) o;
+            double toPlayer = eye.distanceTo(
+                    new Vec3(p.posX, p.posY + p.height / 2.0D, p.posZ));
+            if (toPlayer > PANEL_RANGE) {
+                continue;
+            }
+            if (toPlayer < nearestDist) {
+                nearestDist = toPlayer;
+                nearest = p;
+            }
+
             AxisAlignedBB bb = p.getEntityBoundingBox().expand(0.3D, 0.3D, 0.3D);
             MovingObjectPosition mop = bb.calculateIntercept(eye, end);
             if (mop == null) {
                 continue;
             }
             double d = eye.distanceTo(mop.hitVec);
-            if (d < bestDist) {
-                bestDist = d;
-                best = p;
+            if (d < aimedDist) {
+                aimedDist = d;
+                aimed = p;
             }
         }
+
+        EntityPlayer best = aimed != null ? aimed : nearest;
         if (!loggedScan) {
             loggedScan = true;
             // Names the two possible failures, which look identical on screen: no player
             // inside the ray's bounding box at all, or players there whose hitbox the ray
             // missed. Those need different fixes, so the log says which one happened.
             System.out.println("[PreSight] gear scan: inWorld=" + mc.theWorld.playerEntities.size()
-                    + " inRayBox=" + candidates
-                    + " intercepted=" + (best != null)
+                    + " chosen=" + (best == null ? "none" : best.getName())
+                    + " aimed=" + (aimed != null)
                     + " eye=" + String.format("%.1f,%.1f,%.1f",
                         eye.xCoord, eye.yCoord, eye.zCoord)
                     + " look=" + String.format("%.2f,%.2f,%.2f",

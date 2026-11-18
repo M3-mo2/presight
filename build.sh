@@ -27,7 +27,7 @@ OUT="$ROOT/build"
 CLASSES="$OUT/classes"
 REOBF="$OUT/reobf"
 STAGE="$OUT/stage"
-JAR="$OUT/presight-1.6.4.jar"
+JAR="$OUT/presight-1.7.2.jar"
 
 rm -rf "$OUT"
 mkdir -p "$CLASSES" "$REOBF" "$STAGE"
