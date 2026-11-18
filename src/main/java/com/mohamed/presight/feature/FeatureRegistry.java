@@ -64,9 +64,11 @@ public final class FeatureRegistry {
      */
     public static void tickAll(com.mohamed.presight.core.TickContext ctx) {
         for (Feature f : BY_ID.values()) {
-            if (!Boolean.TRUE.equals(ENABLED.get(f.id()))) {
-                continue;
-            }
+            // Every feature is ticked; each decides for itself whether it has work.
+            //
+            // Not gated on ENABLED: a feature that owns its own key is never toggled through
+            // the registry — the I screen configures without arming — so gating here meant its
+            // tick never ran and a queued burst was never delivered.
             try {
                 f.tick(ctx);
             } catch (Throwable t) {

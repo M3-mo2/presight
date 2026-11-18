@@ -3,7 +3,7 @@
   "modid": "presight",
   "name": "PreSight",
   "description": "See players through walls and inspect what they are holding and wearing.",
-  "version": "1.12.4",
+  "version": "1.13.2",
   "mcversion": "1.8",
   "url": "",
   "updateUrl": "",

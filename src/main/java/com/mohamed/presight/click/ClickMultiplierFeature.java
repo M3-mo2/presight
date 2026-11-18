@@ -81,6 +81,12 @@ public class ClickMultiplierFeature implements Feature {
      */
     private int suppressEvents;
 
+    /** Injected clicks still owed from the last press; exactly one fires per tick. */
+    private int queued;
+
+    /** How many of this burst's clicks the injector accepted. */
+    private int delivered;
+
     /** Bursts fired, for the diagnostic line. */
     private int bursts;
 
@@ -206,15 +212,40 @@ public class ClickMultiplierFeature implements Feature {
         bursts++;
         lastBurstAtMs = now;
         // Each injected click returns as a press and a release.
-        suppressEvents = (count - 1) * 2;
-        int delivered = 1;            // the player's own press, which already happened
-        for (int i = 0; i < count - 1; i++) {
-            if (RobotClicker.click(button == Button.RIGHT, HOLD_MS)) {
-                delivered++;
-            }
-        }
+        suppressEvents += (count - 1) * 2;
+        // Not all at once. Minecraft polls the mouse once per frame, so two presses inside one
+        // frame are one press to the game — the reason x5 delivered only 2. One injected click
+        // per tick is the fastest rate the game can actually distinguish.
+        queued = count - 1;
+        delivered = 1;                // the player's own press, which already happened
         System.out.println("[PreSight] click_multiplier: press #" + bursts + " (" + button
-                + ") -> " + delivered + "/" + count + " delivered");
+                + ") -> queueing " + queued + " more, one per tick");
+    }
+
+    /**
+     * Delivers the queued clicks, one per tick.
+     *
+     * Not all at once: Minecraft polls the mouse once per frame, so two presses inside one
+     * frame are one press as far as the game is concerned — which is exactly why an x5 burst
+     * reached the world as two clicks.
+     */
+    @Override
+    public void tick(com.mohamed.presight.core.TickContext ctx) {
+        if (queued <= 0) {
+            return;
+        }
+        if (ctx == null || ctx.mc.currentScreen != null) {
+            queued = 0;   // a screen opened mid-burst; stop rather than click the screen
+            return;
+        }
+        if (RobotClicker.click(button == Button.RIGHT, HOLD_MS)) {
+            delivered++;
+        }
+        queued--;
+        if (queued == 0) {
+            System.out.println("[PreSight] click_multiplier: burst complete "
+                    + delivered + "/" + count + " delivered, one per tick");
+        }
     }
 
     public String describe() {
