@@ -7,8 +7,11 @@ import net.minecraft.client.Minecraft;
 /**
  * Screen-space drawing for HUD overlays.
  *
- * Wraps Gui's static helpers so features never have to extend Gui or hold a
- * GuiScreen reference — they just say "draw this at that pixel".
+ * Every rect goes through {@link Gui#drawRect}, which is vanilla code and therefore
+ * correct for whichever Minecraft is running. Hand-rolled immediate-mode quads were the
+ * cause of GL_INVALID_OPERATION (1282): mixing glBegin/glEnd with a Tessellator that the
+ * item renderer and the font renderer use in the same pass leaves the driver in a state
+ * where the next primitive is illegal.
  */
 public final class ScreenContext {
 
@@ -23,8 +26,7 @@ public final class ScreenContext {
     }
 
     public void rect(int x, int y, int w, int h, int argb) {
-        float a = (argb >>> 24 & 255) / 255.0F;
-        Gui.drawRect(x, y, x + w, y + h, toArgb(a, argb));
+        Gui.drawRect(x, y, x + w, y + h, argb);
     }
 
     public void outline(int x, int y, int w, int h, int argb) {
@@ -47,9 +49,8 @@ public final class ScreenContext {
     }
 
     /**
-     * Draw an item exactly as the inventory does — icon plus the stack-count
-     * overlay, which is the part people forget and then wonder why a stack of 64
-     * looks like one item.
+     * An item exactly as the inventory draws it — icon plus the stack-count overlay,
+     * which is the part people forget and then wonder why a stack of 64 looks like one.
      */
     public void itemStack(net.minecraft.item.ItemStack stack, int x, int y) {
         if (stack == null) {
@@ -58,10 +59,5 @@ public final class ScreenContext {
         Minecraft mc = Minecraft.getMinecraft();
         mc.getRenderItem().renderItemAndEffectIntoGUI(stack, x, y);
         mc.getRenderItem().renderItemOverlayIntoGUI(font, stack, x, y, null);
-    }
-
-    private static int toArgb(float alpha, int argb) {
-        int ai = (int) (alpha * 255.0F) << 24;
-        return ai | (argb & 0x00FFFFFF);
     }
 }

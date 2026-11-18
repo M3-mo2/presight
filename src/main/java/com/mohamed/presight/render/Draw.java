@@ -3,9 +3,6 @@ package com.mohamed.presight.render;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.renderer.GlStateManager;
-import net.minecraft.client.renderer.Tessellator;
-import net.minecraft.client.renderer.WorldRenderer;
-import net.minecraft.client.renderer.vertex.DefaultVertexFormats;
 import org.lwjgl.opengl.GL11;
 
 /**
@@ -18,6 +15,10 @@ import org.lwjgl.opengl.GL11;
  *
  * So every method restores what it changed, and {@link #forceSaneState()} exists for
  * the case where a draw threw and the normal restore was skipped.
+ *
+ * Boxes live in {@link BoxBatch}, which uses fixed-function GL: the Tessellator's
+ * vertex API differs between 1.8 and 1.8.9, so anything built on it works on exactly
+ * one version. What is left here is the code that is identical in both.
  *
  * Screen and world drawing are strictly separated. A rect drawn while the 3D
  * perspective matrix is still bound is not a small overlay — it is a giant quad out in
@@ -54,63 +55,6 @@ public final class Draw {
     }
 
     // ---------------------------------------------------------------- world space
-
-    /** A line box between two corners, in camera-relative coordinates. */
-    public static void box(double x1, double y1, double z1,
-                           double x2, double y2, double z2,
-                           float r, float g, float b, float a, float width) {
-        push();
-        GlStateManager.disableTexture2D();
-        GlStateManager.disableLighting();
-        GlStateManager.disableCull();
-        GlStateManager.enableBlend();
-        GlStateManager.tryBlendFuncSeparate(
-                GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ZERO);
-        GlStateManager.disableDepth();
-        GlStateManager.depthMask(false);
-        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
-
-        GL11.glLineWidth(width);
-        Tessellator tess = Tessellator.getInstance();
-        WorldRenderer wr = tess.getWorldRenderer();
-        wr.begin(GL11.GL_LINES, DefaultVertexFormats.POSITION_COLOR);
-
-        // 12 edges, written out: corner order is the part that is easy to get wrong and
-        // hard to spot once you have.
-        edge(wr, x1, y1, z1, x2, y1, z1, r, g, b, a);
-        edge(wr, x1, y1, z2, x2, y1, z2, r, g, b, a);
-        edge(wr, x1, y2, z1, x2, y2, z1, r, g, b, a);
-        edge(wr, x1, y2, z2, x2, y2, z2, r, g, b, a);
-
-        edge(wr, x1, y1, z1, x1, y2, z1, r, g, b, a);
-        edge(wr, x2, y1, z1, x2, y2, z1, r, g, b, a);
-        edge(wr, x1, y1, z2, x1, y2, z2, r, g, b, a);
-        edge(wr, x2, y1, z2, x2, y2, z2, r, g, b, a);
-
-        edge(wr, x1, y1, z1, x1, y1, z2, r, g, b, a);
-        edge(wr, x2, y1, z1, x2, y1, z2, r, g, b, a);
-        edge(wr, x1, y2, z1, x1, y2, z2, r, g, b, a);
-        edge(wr, x2, y2, z1, x2, y2, z2, r, g, b, a);
-
-        tess.draw();
-
-        GL11.glLineWidth(1.0F);
-        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
-        GlStateManager.depthMask(true);
-        GlStateManager.enableDepth();
-        GlStateManager.enableCull();
-        GlStateManager.enableLighting();
-        GlStateManager.enableTexture2D();
-        GlStateManager.disableBlend();
-        pop();
-    }
-
-    private static void edge(WorldRenderer wr, double x1, double y1, double z1,
-                             double x2, double y2, double z2,
-                             float r, float g, float b, float a) {
-        wr.pos(x1, y1, z1).color(r, g, b, a).endVertex();
-        wr.pos(x2, y2, z2).color(r, g, b, a).endVertex();
-    }
 
     /** Text in world space, always facing the camera. Coordinates are camera-relative. */
     public static void text3d(String text, double x, double y, double z, float scale,
@@ -176,15 +120,17 @@ public final class Draw {
         float g = (argb >> 8 & 255) / 255.0F;
         float b = (argb & 255) / 255.0F;
 
+        // Fixed-function GL, not the Tessellator: its vertex API differs between 1.8 and
+        // 1.8.9, and a mod built against one throws NoSuchMethodError on the other. These
+        // calls are identical in every version.
         GlStateManager.disableTexture2D();
-        Tessellator tess = Tessellator.getInstance();
-        WorldRenderer wr = tess.getWorldRenderer();
-        wr.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR);
-        wr.pos(x, y + h, 0).color(r, g, b, a).endVertex();
-        wr.pos(x + w, y + h, 0).color(r, g, b, a).endVertex();
-        wr.pos(x + w, y, 0).color(r, g, b, a).endVertex();
-        wr.pos(x, y, 0).color(r, g, b, a).endVertex();
-        tess.draw();
+        GL11.glColor4f(r, g, b, a);
+        GL11.glBegin(GL11.GL_QUADS);
+        GL11.glVertex2f(x, y + h);
+        GL11.glVertex2f(x + w, y + h);
+        GL11.glVertex2f(x + w, y);
+        GL11.glVertex2f(x, y);
+        GL11.glEnd();
         GlStateManager.enableTexture2D();
         GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
     }

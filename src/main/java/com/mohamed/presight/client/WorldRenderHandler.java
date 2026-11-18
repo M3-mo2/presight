@@ -2,29 +2,30 @@ package com.mohamed.presight.client;
 
 import com.mohamed.presight.feature.Feature;
 import com.mohamed.presight.feature.FeatureRegistry;
+import com.mohamed.presight.render.BoxBatch;
+import com.mohamed.presight.render.TextBatch;
 import com.mohamed.presight.render.Draw;
 import com.mohamed.presight.render.RenderContext;
-import com.mohamed.presight.render.ScreenContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.entity.Entity;
-import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 
 /**
- * The world render pass.
+ * The world render pass: one begin, every feature, one flush.
  *
- * A public top-level class on purpose. Forge 1.8.9's EventBus discovers handlers by
- * reflection over the registered instance's class; keeping listeners public and
- * top-level removes one whole category of "registered but never called" from the
- * picture, which is otherwise invisible — the registration succeeds and nothing warns.
+ * The single shared batch is not a micro-optimisation. A Tessellator flush per box means
+ * one submission per player per frame; on a full server that alone takes the frame rate
+ * to single digits, and the visible symptom is "the mod lags and the game looks wrong".
  *
- * It also logs the first time it runs. Without that, "no box on screen" cannot be
- * distinguished from "this handler never fired", and those need opposite fixes.
+ * The batch is flushed in a finally block, always. An unflushed batch leaves an open draw
+ * call and every later draw in the frame lands inside it.
  */
 public class WorldRenderHandler {
 
+    private final BoxBatch boxes = new BoxBatch();
+    private final TextBatch texts = new TextBatch();
     private boolean announced;
 
     @SubscribeEvent
@@ -33,17 +34,9 @@ public class WorldRenderHandler {
         if (mc.theWorld == null || mc.thePlayer == null || mc.fontRendererObj == null) {
             return;
         }
-
         RenderManager rm = mc.getRenderManager();
         if (rm == null) {
             return;
-        }
-
-        if (!announced) {
-            announced = true;
-            System.out.println("[PreSight] render pass is live (world=" + mc.theWorld.getClass().getSimpleName()
-                    + ", players=" + mc.theWorld.playerEntities.size()
-                    + ", enabled=" + enabledList() + ")");
         }
 
         Entity viewer = mc.getRenderViewEntity();
@@ -51,37 +44,46 @@ public class WorldRenderHandler {
             viewer = mc.thePlayer;
         }
 
-        // Interpolated camera position. RenderManager already computes exactly this and
-        // exposes it publicly, so use its values rather than recomputing them slightly
-        // differently here — a small mismatch shifts every box by a fraction and looks
-        // like the feature is broken.
+        // RenderManager already computed exactly this for the frame; using its values
+        // instead of recomputing removes a class of small drift.
         float pt = event.partialTicks;
         double camX = rm.viewerPosX;
         double camY = rm.viewerPosY;
         double camZ = rm.viewerPosZ;
         if (camX == 0.0D && camY == 0.0D && camZ == 0.0D) {
-            // Not cached yet (first frame): fall back to the manual interpolation.
             camX = viewer.lastTickPosX + (viewer.posX - viewer.lastTickPosX) * pt;
             camY = viewer.lastTickPosY + (viewer.posY - viewer.lastTickPosY) * pt;
             camZ = viewer.lastTickPosZ + (viewer.posZ - viewer.lastTickPosZ) * pt;
         }
 
         RenderContext ctx = new RenderContext(camX, camY, camZ, pt,
-                rm.playerViewY, rm.playerViewX);
+                rm.playerViewY, rm.playerViewX, boxes, texts);
 
-        for (Feature f : FeatureRegistry.all()) {
-            if (!FeatureRegistry.isEnabled(f.id())) {
-                continue;
+        if (!announced) {
+            announced = true;
+            System.out.println("[PreSight] render pass is live (players="
+                    + mc.theWorld.playerEntities.size() + ", enabled=" + enabledList() + ")");
+        }
+
+        boxes.begin(2.0F);
+        try {
+            for (Feature f : FeatureRegistry.all()) {
+                if (!FeatureRegistry.isEnabled(f.id())) {
+                    continue;
+                }
+                try {
+                    f.renderWorld(ctx);
+                } catch (Throwable t) {
+                    System.err.println("[PreSight] world '" + f.id() + "' threw:");
+                    t.printStackTrace();
+                    Draw.forceSaneState();
+                }
             }
-            try {
-                f.renderWorld(ctx);
-            } catch (Throwable t) {
-                // A throw mid-draw skips that draw's cleanup, and a leftover matrix or
-                // texture state breaks every pixel drawn afterwards.
-                System.err.println("[PreSight] world '" + f.id() + "' threw:");
-                t.printStackTrace();   // the message alone hides the frame that mattered
-                Draw.forceSaneState();
-            }
+        } finally {
+            // Order matters: the line batch closes first, because text has to change GL
+            // state and none of that is legal between glBegin and glEnd.
+            boxes.flush();
+            texts.draw(ctx);
         }
     }
 

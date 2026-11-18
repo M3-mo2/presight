@@ -102,16 +102,11 @@ public class HudRenderHandler {
         int x = 4;
         int y = 4;
 
-        Draw.beginGui();
-        try {
-            Draw.rect(x - 2, y - 2, w + 6, 12, 0xC0000000);
-            Draw.outline(x - 2, y - 2, w + 6, 12, others > 0 ? GREEN : RED);
-            // Raw font call: the simplest thing that definitely works, so its visibility
-            // says something unambiguous about the pass itself.
-            font.drawStringWithShadow(line, x + 1, y + 1, others > 0 ? GREEN : GREY);
-        } finally {
-            Draw.endGui();
-        }
+        // Vanilla helpers only: Gui.drawRect is correct for whichever version is
+        // running, and it does not fight the Tessellator the font renderer uses.
+        ctx.rect(x - 2, y - 2, w + 6, 12, 0xC0000000);
+        ctx.outline(x - 2, y - 2, w + 6, 12, others > 0 ? GREEN : RED);
+        font.drawStringWithShadow(line, x + 1, y + 1, others > 0 ? GREEN : GREY);
     }
 
     private static boolean anyEnabled() {

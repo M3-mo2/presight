@@ -92,9 +92,10 @@ public class GearViewFeature implements Feature {
 
         // The box belongs to the 3D pass; it is the only thing drawn here.
         double half = target.width / 2.0D;
-        Draw.box(ctx.relX(target) - half, ctx.relY(target), ctx.relZ(target) - half,
-                 ctx.relX(target) + half, ctx.relY(target) + target.height, ctx.relZ(target) + half,
-                 0.23F, 0.82F, 0.48F, 1.0F, 2.0F);
+        ctx.boxes.colour(0.23F, 0.82F, 0.48F, 1.0F);
+        ctx.boxes.addBox(ctx.relX(target) - half, ctx.relY(target), ctx.relZ(target) - half,
+                ctx.relX(target) + half, ctx.relY(target) + target.height,
+                ctx.relZ(target) + half);
 
         GearSnapshot gear = GearSnapshot.of(target);
         List<ItemStack> items = gear.presentItems();
@@ -133,10 +134,9 @@ public class GearViewFeature implements Feature {
             return;
         }
 
-        Draw.beginGui();
-        try {
-            Draw.rect(screenX, screenY, panelW, panelH, BG);
-            Draw.outline(screenX, screenY, panelW, panelH, BORDER);
+        {
+            ctx.rect(screenX, screenY, panelW, panelH, BG);
+            ctx.outline(screenX, screenY, panelW, panelH, BORDER);
 
             FontRenderer font = ctx.font;
             if (name != null) {
@@ -159,10 +159,6 @@ public class GearViewFeature implements Feature {
             }
             RenderHelper.disableStandardItemLighting();
             GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
-        } finally {
-            // Unconditional, even on the exception path: a matrix left on the stack is
-            // cumulative and ends in GL_STACK_OVERFLOW a few frames later.
-            Draw.endGui();
         }
     }
 

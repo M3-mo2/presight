@@ -61,9 +61,9 @@ public class PlayerEspFeature implements Feature {
             double y1 = ctx.relY(p);
             double y2 = y1 + p.height;
 
-            Draw.box(cx - half, y1, cz - half, cx + half, y2, cz + half,
-                    R, G, B, 1.0F, 2.0F);
-            Draw.text3d(p.getName(), cx, y2 + 0.45D, cz, 0.03F, 0xFF9BFF6B, ctx);
+            ctx.boxes.colour(R, G, B, 1.0F);
+            ctx.boxes.addBox(cx - half, y1, cz - half, cx + half, y2, cz + half);
+            ctx.texts.add(p.getName(), cx, y2 + 0.45D, cz, 0.03F, 0xFF9BFF6B);
             drawn++;
         }
 
