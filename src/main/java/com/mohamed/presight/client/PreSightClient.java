@@ -77,6 +77,16 @@ public final class PreSightClient {
 
         try {
             FMLCommonHandler.instance().bus().register(KEYS);  // ClientTickEvent
+        } catch (Throwable t) {
+            System.err.println("[PreSight] could not register the key poller: " + t);
+            t.printStackTrace();
+        }
+
+        try {
+            // Input events are on FML's bus, not Forge's. Registered separately and in its
+            // own guard: a shared try block here once killed every handler after a failure.
+            FMLCommonHandler.instance().bus().register(new com.mohamed.presight.click.MouseInputHandler());
+            System.out.println("[PreSight] mouse input registered");
             System.out.println("[PreSight] key poller registered");
         } catch (Throwable t) {
             System.err.println("[PreSight] could not register the key poller: " + t);

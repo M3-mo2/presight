@@ -1,6 +1,5 @@
 package com.mohamed.presight.click;
 
-import com.mohamed.presight.core.TickContext;
 import com.mohamed.presight.feature.Feature;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
@@ -10,7 +9,6 @@ import net.minecraft.item.ItemStack;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.MovingObjectPosition;
 import org.lwjgl.input.Keyboard;
-import org.lwjgl.input.Mouse;
 
 /**
  * Multiplies a real click into two, three, four or five actions in the same tick.
@@ -42,6 +40,18 @@ public class ClickMultiplierFeature implements Feature {
 
     public static final String ID = "click_multiplier";
 
+    /** How long the synthetic press is held, in ms. A fast human click is 2-5 ms. */
+    private static final int HOLD_MS = 3;
+    /**
+     * How long after a burst its own synthetic events are ignored.
+     *
+     * The burst is at most four clicks of HOLD_MS each, plus the drain of one input pass, so
+     * 120 ms covers it with room to spare while still letting a fast player click again.
+     */
+    private static final int BURST_WINDOW_MS = 120;
+    /** After this long, an unreturned synthetic event is forgotten rather than blocking input. */
+    private static final int SUPPRESS_TIMEOUT_MS = 400;
+
     /** Which button is being multiplied. */
     public enum Button {
         LEFT, RIGHT
@@ -51,18 +61,29 @@ public class ClickMultiplierFeature implements Feature {
     private int count = 3;
     private boolean active;
 
-    /** Whether the real button was down last tick, for edge detection. */
-    private boolean leftWasDown;
-    private boolean rightWasDown;
+    /**
+     * Timestamp of the last burst.
+     *
+     * A boolean flag is not enough: Robot.mousePress queues its event and LWJGL drains it on
+     * the next input pass, by which time any flag has already been cleared — so each synthetic
+     * click re-entered this method and the count ran away (127 presses in one test). A time
+     * window swallows the drain, and it is bounded to the burst length.
+     */
+    private long lastBurstAtMs;
+
+    /**
+     * How many synthetic events are still expected back from the injector.
+     *
+     * A time window was not enough: Robot's events are drained by LWJGL on its own schedule,
+     * and on a software-rendered client that drain can land past any fixed window, so a burst
+     * still re-entered itself (13 presses from 3 clicks). Counting is exact — each injected
+     * press is expected exactly once, so exactly that many are swallowed.
+     */
+    private int suppressEvents;
 
     /** Bursts fired, for the diagnostic line. */
     private int bursts;
 
-    /** Repeats still owed from the last press; one is delivered per tick. */
-    private int pending;
-
-    /** Repeats that the game actually accepted, printed once per burst. */
-    private int delivered;
 
     @Override
     public String id() {
@@ -118,10 +139,12 @@ public class ClickMultiplierFeature implements Feature {
         this.count = Math.max(2, Math.min(5, c));
         this.active = true;
         System.out.println("[PreSight] click_multiplier ON: " + button + " x" + count);
-        // Resolve the cooldown fields now, not on the first burst: if reflection cannot open
-        // them the owner needs to know before they rely on the tool, not after a click that
-        // silently fell back to the game's own pacing.
-        System.out.println("[PreSight] click cooldowns: " + ClickCooldowns.report());
+        // Prove the injector works before the player relies on it. AWT Robot either has
+        // permission to synthesise input or it does not, and finding out on the first click
+        // costs a wasted burst.
+        boolean ok = RobotClicker.init();
+        System.out.println("[PreSight] click_multiplier injector: "
+                + (ok ? "ready" : RobotClicker.report()));
     }
 
     public Button button() {
@@ -143,112 +166,55 @@ public class ClickMultiplierFeature implements Feature {
         }
     }
 
-    @Override
-    public void tick(TickContext ctx) {
-        if (!active) {
-            leftWasDown = Mouse.isButtonDown(0);
-            rightWasDown = Mouse.isButtonDown(1);
-            pending = 0;
-            return;
+    /**
+     * True when this event is one of our own coming back.
+     *
+     * Each injected click returns as a press <em>and</em> a release, so the counter is charged
+     * double. A stale count is dropped after SUPPRESS_TIMEOUT_MS so a lost event can never
+     * permanently eat the player's clicks.
+     */
+    public boolean consumeInjected() {
+        if (suppressEvents <= 0) {
+            return false;
         }
-        // Only while actually in the world and not typing in a screen: a burst fired while a
-        // chest is open would click the container, not the world.
-        if (ctx.mc.currentScreen != null) {
-            leftWasDown = Mouse.isButtonDown(0);
-            rightWasDown = Mouse.isButtonDown(1);
-            pending = 0;
-            return;
+        if (System.currentTimeMillis() - lastBurstAtMs > SUPPRESS_TIMEOUT_MS) {
+            suppressEvents = 0;
+            return false;
         }
-
-        boolean leftDown = Mouse.isButtonDown(0);
-        boolean rightDown = Mouse.isButtonDown(1);
-
-        boolean pressed = (button == Button.LEFT && leftDown && !leftWasDown)
-                || (button == Button.RIGHT && rightDown && !rightWasDown);
-
-        leftWasDown = leftDown;
-        rightWasDown = rightDown;
-
-        if (pressed) {
-            // Queue the repeats instead of running them here.
-            //
-            // Everything in one tick was the bug: the game applies its own click for this tick
-            // first, then refuses a second action on the same block from the same tick, so the
-            // burst produced nothing at all and the tool looked dead while reporting ON.
-            // One repeat per tick is the fastest rate the game will actually honour.
-            pending = count - 1;
-            bursts++;
-            if (bursts <= 3 || bursts % 25 == 0) {
-                // Printed the moment the press is seen, before any replay. If the owner's log
-                // has no line here, the tool never saw the click at all — a different fault
-                // from "it saw it and the repeat was refused", and the two need different fixes.
-                System.out.println("[PreSight] click_multiplier: press #" + bursts
-                        + " detected (" + button + "), queueing " + (count - 1) + " repeat(s)");
-            }
-        }
-
-        if (pending > 0) {
-            // Everything the player asked for, now, in this tick — not spread out.
-            //
-            // Spreading the repeats over ticks made the tool feel like a slow autoclicker, and
-            // the owner's point is exact: three clicks should land like three fast human
-            // clicks, not like a metronome. The cooldowns are cleared between repeats so the
-            // game accepts each one; the whole burst is four calls deep at most.
-            for (int i = 0; i < pending; i++) {
-                ClickCooldowns.clear();
-                if (replay(ctx, button)) {
-                    delivered++;
-                }
-            }
-            pending = 0;
-            System.out.println("[PreSight] click_multiplier: press -> " + (1 + delivered)
-                    + " action(s) accepted of " + count + " requested, same tick");
-            delivered = 0;
-        }
+        suppressEvents--;
+        return true;
     }
 
-    /** Perform the same action the real click just performed. */
-    private boolean replay(TickContext ctx, Button which) {
-        Minecraft mc = ctx.mc;
-        EntityPlayerSP p = ctx.player;
-        MovingObjectPosition hit = mc.objectMouseOver;
-        if (p == null || mc.playerController == null) {
-            return false;
+    /**
+     * Called by the input handler the instant a real press is seen.
+     *
+     * Not a tick hook: a click is an event, and polling for it once per tick missed it
+     * entirely because LWJGL drains button events before the tick runs.
+     */
+    public void onMousePress(int mouseButton) {
+        if (!active) {
+            return;
         }
-        try {
-            if (which == Button.RIGHT) {
-                // getHeldItem is declared on EntityPlayer, not EntityPlayerSP: naming the
-                // subclass leaves a call the SRG map has no entry for, which survives the
-                // remap as a readable name and throws NoSuchMethodError on the first click.
-                ItemStack held = ((net.minecraft.entity.player.EntityPlayer) p).getHeldItem();
-                if (held == null) {
-                    return false;
-                }
-                return mc.playerController.sendUseItem(p, ctx.world, held);
-            }
-            if (hit != null
-                    && hit.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY
-                    && hit.entityHit != null) {
-                Entity target = hit.entityHit;
-                mc.playerController.attackEntity(p, target);
-                p.swingItem();
-                return true;
-            }
-            if (hit != null
-                    && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK) {
-                BlockPos pos = hit.getBlockPos();
-                boolean ok = mc.playerController.clickBlock(pos, hit.sideHit);
-                p.swingItem();
-                return ok;
-            }
-            // Nothing under the crosshair: a left click in the air is only an arm swing.
-            p.swingItem();
-            return false;
-        } catch (Throwable t) {
-            // A repeat that fails must never take the click that worked down with it.
-            System.err.println("[PreSight] click_multiplier replay failed: " + t);
-            return false;
+        long now = System.currentTimeMillis();
+        if (now - lastBurstAtMs < BURST_WINDOW_MS) {
+            return;
         }
+        int wanted = button == Button.LEFT ? 0 : 1;
+        if (mouseButton != wanted) {
+            return;
+        }
+        bursts++;
+        lastBurstAtMs = now;
+        // Each injected click returns as a press and a release.
+        suppressEvents = (count - 1) * 2;
+        int delivered = 1;            // the player's own press, which already happened
+        for (int i = 0; i < count - 1; i++) {
+            if (RobotClicker.click(button == Button.RIGHT, HOLD_MS)) {
+                delivered++;
+            }
+        }
+        System.out.println("[PreSight] click_multiplier: press #" + bursts + " (" + button
+                + ") -> " + delivered + "/" + count + " delivered");
     }
 
     public String describe() {
