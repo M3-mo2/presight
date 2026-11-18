@@ -118,6 +118,10 @@ public class ClickMultiplierFeature implements Feature {
         this.count = Math.max(2, Math.min(5, c));
         this.active = true;
         System.out.println("[PreSight] click_multiplier ON: " + button + " x" + count);
+        // Resolve the cooldown fields now, not on the first burst: if reflection cannot open
+        // them the owner needs to know before they rely on the tool, not after a click that
+        // silently fell back to the game's own pacing.
+        System.out.println("[PreSight] click cooldowns: " + ClickCooldowns.report());
     }
 
     public Button button() {
@@ -184,17 +188,22 @@ public class ClickMultiplierFeature implements Feature {
         }
 
         if (pending > 0) {
-            if (replay(ctx, button)) {
-                delivered++;
+            // Everything the player asked for, now, in this tick — not spread out.
+            //
+            // Spreading the repeats over ticks made the tool feel like a slow autoclicker, and
+            // the owner's point is exact: three clicks should land like three fast human
+            // clicks, not like a metronome. The cooldowns are cleared between repeats so the
+            // game accepts each one; the whole burst is four calls deep at most.
+            for (int i = 0; i < pending; i++) {
+                ClickCooldowns.clear();
+                if (replay(ctx, button)) {
+                    delivered++;
+                }
             }
-            pending--;
-            if (pending == 0) {
-                // The number that matters: how many repeats the game took, not how many were
-                // attempted. A burst that reports 0 here means the controller refused them.
-                System.out.println("[PreSight] click_multiplier: press -> " + (1 + delivered)
-                        + " action(s) accepted of " + count + " requested");
-                delivered = 0;
-            }
+            pending = 0;
+            System.out.println("[PreSight] click_multiplier: press -> " + (1 + delivered)
+                    + " action(s) accepted of " + count + " requested, same tick");
+            delivered = 0;
         }
     }
 
