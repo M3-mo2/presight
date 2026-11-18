@@ -1,6 +1,5 @@
 package com.mohamed.presight;
 
-import net.minecraftforge.common.config.Configuration;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -18,6 +17,10 @@ import java.io.File;
  * Everything is driven through {@link com.mohamed.presight.feature.FeatureRegistry},
  * so adding a third ability later means writing a Feature and registering it — the
  * keybinding, the config entry and the render pass come for free.
+ *
+ * Every entry point here is defensive. An exception escaping a mod's preInit during
+ * mod loading is fatal to the whole game, so nothing in this path is allowed to throw:
+ * a broken config or an unavailable client class must degrade, not crash.
  */
 @Mod(modid = PreSight.MODID, name = PreSight.NAME, version = PreSight.VERSION,
      acceptableRemoteVersions = "*", clientSideOnly = true)
@@ -25,38 +28,48 @@ public class PreSight {
 
     public static final String MODID = "presight";
     public static final String NAME = "PreSight";
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.0.1";
 
     @Mod.Instance(MODID)
     public static PreSight instance;
 
-    private File configFile;
+    private File configDir;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
-        configFile = new File(event.getModConfigurationDirectory(), "presight.cfg");
+        try {
+            configDir = event.getModConfigurationDirectory();
+        } catch (Throwable t) {
+            System.err.println("[PreSight] no config directory: " + t);
+        }
         // Client-only data, but preInit still runs on both sides in a dev workspace.
         if (event.getSide() == Side.CLIENT) {
-            com.mohamed.presight.client.PreSightClient.init();
+            try {
+                com.mohamed.presight.client.PreSightClient.init();
+            } catch (Throwable t) {
+                // A failure here must still leave a loadable mod: the game starts,
+                // the features are simply off, and the log says why.
+                System.err.println("[PreSight] client init failed, features disabled: " + t);
+                t.printStackTrace();
+            }
         }
     }
 
     @Mod.EventHandler
     public void init(FMLInitializationEvent event) {
         if (event.getSide() == Side.CLIENT) {
-            com.mohamed.presight.client.PreSightClient.registerHandlers();
+            try {
+                com.mohamed.presight.client.PreSightClient.registerHandlers();
+            } catch (Throwable t) {
+                System.err.println("[PreSight] handler registration failed: " + t);
+                t.printStackTrace();
+            }
         }
     }
 
-    /** Loaded on demand by the settings screen and the feature registry. */
-    public Configuration openConfig() {
-        Configuration cfg = new Configuration(configFile);
-        try {
-            cfg.load();
-        } catch (Exception e) {
-            System.err.println("[PreSight] config load failed, defaults in use: " + e);
-        }
-        return cfg;
+    /** The directory config files live in; may be null if discovery failed. */
+    public File configDirectory() {
+        return configDir;
     }
 
     public static PreSight get() {
