@@ -58,6 +58,12 @@ public class ClickMultiplierFeature implements Feature {
     /** Bursts fired, for the diagnostic line. */
     private int bursts;
 
+    /** Repeats still owed from the last press; one is delivered per tick. */
+    private int pending;
+
+    /** Repeats that the game actually accepted, printed once per burst. */
+    private int delivered;
+
     @Override
     public String id() {
         return ID;
@@ -138,6 +144,7 @@ public class ClickMultiplierFeature implements Feature {
         if (!active) {
             leftWasDown = Mouse.isButtonDown(0);
             rightWasDown = Mouse.isButtonDown(1);
+            pending = 0;
             return;
         }
         // Only while actually in the world and not typing in a screen: a burst fired while a
@@ -145,37 +152,59 @@ public class ClickMultiplierFeature implements Feature {
         if (ctx.mc.currentScreen != null) {
             leftWasDown = Mouse.isButtonDown(0);
             rightWasDown = Mouse.isButtonDown(1);
+            pending = 0;
             return;
         }
 
         boolean leftDown = Mouse.isButtonDown(0);
         boolean rightDown = Mouse.isButtonDown(1);
 
-        boolean fire = (button == Button.LEFT && leftDown && !leftWasDown)
+        boolean pressed = (button == Button.LEFT && leftDown && !leftWasDown)
                 || (button == Button.RIGHT && rightDown && !rightWasDown);
 
         leftWasDown = leftDown;
         rightWasDown = rightDown;
 
-        if (fire) {
+        if (pressed) {
+            // Queue the repeats instead of running them here.
+            //
+            // Everything in one tick was the bug: the game applies its own click for this tick
+            // first, then refuses a second action on the same block from the same tick, so the
+            // burst produced nothing at all and the tool looked dead while reporting ON.
+            // One repeat per tick is the fastest rate the game will actually honour.
+            pending = count - 1;
             bursts++;
-            for (int i = 1; i < count; i++) {
-                replay(ctx, button);
+            if (bursts <= 3 || bursts % 25 == 0) {
+                // Printed the moment the press is seen, before any replay. If the owner's log
+                // has no line here, the tool never saw the click at all — a different fault
+                // from "it saw it and the repeat was refused", and the two need different fixes.
+                System.out.println("[PreSight] click_multiplier: press #" + bursts
+                        + " detected (" + button + "), queueing " + (count - 1) + " repeat(s)");
             }
-            if (bursts == 1 || bursts % 20 == 0) {
-                System.out.println("[PreSight] click_multiplier: " + button + " x" + count
-                        + " (burst " + bursts + ")");
+        }
+
+        if (pending > 0) {
+            if (replay(ctx, button)) {
+                delivered++;
+            }
+            pending--;
+            if (pending == 0) {
+                // The number that matters: how many repeats the game took, not how many were
+                // attempted. A burst that reports 0 here means the controller refused them.
+                System.out.println("[PreSight] click_multiplier: press -> " + (1 + delivered)
+                        + " action(s) accepted of " + count + " requested");
+                delivered = 0;
             }
         }
     }
 
     /** Perform the same action the real click just performed. */
-    private void replay(TickContext ctx, Button which) {
+    private boolean replay(TickContext ctx, Button which) {
         Minecraft mc = ctx.mc;
         EntityPlayerSP p = ctx.player;
         MovingObjectPosition hit = mc.objectMouseOver;
         if (p == null || mc.playerController == null) {
-            return;
+            return false;
         }
         try {
             if (which == Button.RIGHT) {
@@ -183,10 +212,10 @@ public class ClickMultiplierFeature implements Feature {
                 // subclass leaves a call the SRG map has no entry for, which survives the
                 // remap as a readable name and throws NoSuchMethodError on the first click.
                 ItemStack held = ((net.minecraft.entity.player.EntityPlayer) p).getHeldItem();
-                if (held != null) {
-                    mc.playerController.sendUseItem(p, ctx.world, held);
+                if (held == null) {
+                    return false;
                 }
-                return;
+                return mc.playerController.sendUseItem(p, ctx.world, held);
             }
             if (hit != null
                     && hit.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY
@@ -194,20 +223,22 @@ public class ClickMultiplierFeature implements Feature {
                 Entity target = hit.entityHit;
                 mc.playerController.attackEntity(p, target);
                 p.swingItem();
-                return;
+                return true;
             }
             if (hit != null
                     && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK) {
                 BlockPos pos = hit.getBlockPos();
-                mc.playerController.clickBlock(pos, hit.sideHit);
+                boolean ok = mc.playerController.clickBlock(pos, hit.sideHit);
                 p.swingItem();
-                return;
+                return ok;
             }
             // Nothing under the crosshair: a left click in the air is only an arm swing.
             p.swingItem();
+            return false;
         } catch (Throwable t) {
             // A repeat that fails must never take the click that worked down with it.
             System.err.println("[PreSight] click_multiplier replay failed: " + t);
+            return false;
         }
     }
 
