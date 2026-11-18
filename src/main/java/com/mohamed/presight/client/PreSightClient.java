@@ -13,20 +13,26 @@ import net.minecraft.entity.Entity;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
+import net.minecraftforge.fml.common.gameevent.TickEvent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
 /**
- * Client wiring: registers the features, their keys, and the one world render pass.
+ * Client wiring: registers the features, their keys, and the two per-frame passes.
  *
- * The render pass is shared rather than one handler per feature, so the camera maths
- * happens once per frame no matter how many features exist.
+ * Two buses are involved and they are not interchangeable, which is where key
+ * handling goes wrong: client input and tick events are posted on FML's bus
+ * ({@code FMLCommonHandler.instance().bus()}), while world render events are posted on
+ * Forge's ({@code MinecraftForge.EVENT_BUS}). Subscribing to the wrong one registers
+ * cleanly, logs nothing, and never fires.
  */
 @SideOnly(Side.CLIENT)
 public final class PreSightClient {
 
     private static final WorldRenderer RENDERER = new WorldRenderer();
+    private static final KeyPoller KEYS = new KeyPoller();
 
     private PreSightClient() {
     }
@@ -39,13 +45,34 @@ public final class PreSightClient {
         // After registration: the stored state and keys are applied onto the features
         // and bindings that now exist.
         com.mohamed.presight.config.ConfigStore.load();
+        System.out.println("[PreSight] features: " + Keybinds.describe());
     }
 
     /** Event bus subscriptions — after the buses exist. */
     public static void registerHandlers() {
+        // World render: Forge's bus.
         MinecraftForge.EVENT_BUS.register(RENDERER);
-        MinecraftForge.EVENT_BUS.register(new Keybinds());
+        // Client tick: FML's bus. This is what drives the key polling.
+        FMLCommonHandler.instance().bus().register(KEYS);
         ClientCommandHandler.instance.registerCommand(new PreSightCommand());
+    }
+
+    /** Polls the toggle keys once per client tick. */
+    @SideOnly(Side.CLIENT)
+    private static final class KeyPoller {
+
+        @SubscribeEvent
+        public void onClientTick(TickEvent.ClientTickEvent event) {
+            if (event.phase != TickEvent.Phase.END) {
+                return;   // once per tick, not twice
+            }
+            try {
+                Keybinds.poll();
+            } catch (Throwable t) {
+                // A dead key must not take down the game loop.
+                System.err.println("[PreSight] key poll failed: " + t);
+            }
+        }
     }
 
     /** Turns the frame into a RenderContext and hands it to every enabled feature. */
