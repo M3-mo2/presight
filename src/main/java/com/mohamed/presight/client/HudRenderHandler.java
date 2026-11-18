@@ -92,7 +92,27 @@ public class HudRenderHandler {
                 + " | players " + others
                 + " | " + enabledList();
 
-        // Also to the log, periodically, so it can be sent without a screenshot.
+
+        // The build assistant's live decision, drawn on screen.
+        //
+        // Logging was not enough: "it does nothing" and "it decided not to act" look
+        // identical in a log tail that scrolls, and the owner has no way to tell whether
+        // sneak/blocks/drop are being read at all. Showing the three inputs next to the
+        // status line makes the decision visible without opening anything.
+        String assistant = null;
+        for (com.mohamed.presight.feature.Feature f : FeatureRegistry.all()) {
+            if (f instanceof com.mohamed.presight.safety.BuildAssistantFeature) {
+                assistant = ((com.mohamed.presight.safety.BuildAssistantFeature) f).hudLine();
+                break;
+            }
+        }
+        if (assistant != null) {
+            line = line + "  " + assistant;
+        }
+
+        // Logged after the assistant suffix is appended, so the log line and the screen
+        // line are the same string — otherwise "the HUD says X" and "the log says Y" is a
+        // disagreement the reader has to resolve by eye.
         if (frameCount % 200 == 0) {
             System.out.println("[PreSight] status: " + line);
         }

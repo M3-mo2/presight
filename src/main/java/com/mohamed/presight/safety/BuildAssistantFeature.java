@@ -3,6 +3,7 @@ package com.mohamed.presight.safety;
 import com.mohamed.presight.core.Blocks;
 import com.mohamed.presight.core.TickContext;
 import com.mohamed.presight.feature.Feature;
+import com.mohamed.presight.feature.FeatureRegistry;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.entity.Entity;
@@ -63,6 +64,11 @@ public class BuildAssistantFeature implements Feature {
     /** Last printed decision, so the log shows changes rather than sixty lines a second. */
     private String lastDiag = "";
 
+    /** Last decision inputs, so the HUD can show why it is or is not acting. */
+    private boolean lastSneaking;
+    private boolean lastHolding;
+    private int lastDrop;
+
     @Override
     public String id() {
         return ID;
@@ -99,6 +105,9 @@ public class BuildAssistantFeature implements Feature {
         boolean sneaking = ((Entity) p).isSneaking();
         boolean holding = holdingBlocks(p);
         int drop = dangerDropAhead(p, world);
+        lastSneaking = sneaking;
+        lastHolding = holding;
+        lastDrop = drop;
 
         boolean wasArmed = armed;
         if (!armed) {
@@ -225,5 +234,22 @@ public class BuildAssistantFeature implements Feature {
     /** What the HUD status line can show, so the tool's state is visible rather than guessed. */
     public String status() {
         return armed ? (holdingSneak ? "HOLDING" : "armed") : "watching";
+    }
+
+    /**
+     * One compact line for the HUD: the three inputs and the decision.
+     *
+     * The three inputs matter as much as the verdict. "U: no" on its own says the tool did
+     * nothing; "U: s=true b=true d=8" says exactly which of the three conditions was missing,
+     * which is the difference between a bug report and a fix.
+     */
+    public String hudLine() {
+        if (!FeatureRegistry.isEnabled(ID)) {
+            return "U: off";
+        }
+        return "U: " + (holdingSneak ? "HOLDING" : armed ? "armed" : "wait")
+                + " s=" + (lastSneaking ? "1" : "0")
+                + " b=" + (lastHolding ? "1" : "0")
+                + " d=" + lastDrop;
     }
 }
