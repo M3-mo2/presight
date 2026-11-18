@@ -6,11 +6,14 @@ import com.mohamed.presight.feature.Feature;
 import com.mohamed.presight.feature.FeatureRegistry;
 import com.mohamed.presight.gear.GearViewFeature;
 import com.mohamed.presight.keybind.Keybinds;
+import com.mohamed.presight.render.Draw;
 import com.mohamed.presight.render.RenderContext;
+import com.mohamed.presight.render.ScreenContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.entity.RenderManager;
 import net.minecraft.entity.Entity;
 import net.minecraftforge.client.ClientCommandHandler;
+import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.FMLCommonHandler;
@@ -32,6 +35,7 @@ import net.minecraftforge.fml.relauncher.SideOnly;
 public final class PreSightClient {
 
     private static final WorldRenderer RENDERER = new WorldRenderer();
+    private static final HudRenderer HUD = new HudRenderer();
     private static final KeyPoller KEYS = new KeyPoller();
 
     private PreSightClient() {
@@ -52,9 +56,47 @@ public final class PreSightClient {
     public static void registerHandlers() {
         // World render: Forge's bus.
         MinecraftForge.EVENT_BUS.register(RENDERER);
+        // HUD pass: also Forge's bus, but a different event — this is the only place
+        // screen-space drawing is correct, because Minecraft has set the 2D projection.
+        MinecraftForge.EVENT_BUS.register(HUD);
         // Client tick: FML's bus. This is what drives the key polling.
         FMLCommonHandler.instance().bus().register(KEYS);
         ClientCommandHandler.instance.registerCommand(new PreSightCommand());
+    }
+
+    /** Draws each enabled feature's screen layer, after the vanilla HUD. */
+    @SideOnly(Side.CLIENT)
+    private static final class HudRenderer {
+
+        @SubscribeEvent
+        public void onRenderOverlay(RenderGameOverlayEvent.Post event) {
+            if (event.type != RenderGameOverlayEvent.ElementType.ALL) {
+                return;
+            }
+            Minecraft mc = Minecraft.getMinecraft();
+            if (mc.theWorld == null || mc.thePlayer == null || mc.fontRendererObj == null) {
+                return;
+            }
+
+            ScreenContext ctx = new ScreenContext(
+                    event.resolution.getScaledWidth(),
+                    event.resolution.getScaledHeight(),
+                    mc.fontRendererObj);
+
+            for (Feature f : FeatureRegistry.all()) {
+                if (!FeatureRegistry.isEnabled(f.id())) {
+                    continue;
+                }
+                try {
+                    f.renderScreen(ctx);
+                } catch (Throwable t) {
+                    // A draw that throws skips its own cleanup, which leaves GL state
+                    // that turns the entire HUD white. Reset before carrying on.
+                    System.err.println("[PreSight] screen '" + f.id() + "' threw: " + t);
+                    Draw.forceSaneState();
+                }
+            }
+        }
     }
 
     /** Polls the toggle keys once per client tick. */
@@ -110,10 +152,11 @@ public final class PreSightClient {
                 if (FeatureRegistry.isEnabled(f.id())) {
                     try {
                         f.renderWorld(ctx);
-                    } catch (RuntimeException e) {
-                        // One broken feature must not take the frame down with it, or
-                        // the game becomes unplayable and the cause is invisible.
-                        System.err.println("[PreSight] feature '" + f.id() + "' threw: " + e);
+                    } catch (Throwable t) {
+                        // A throw mid-draw skips that draw's cleanup, and a leftover
+                        // texture/depth state breaks every pixel drawn afterwards.
+                        System.err.println("[PreSight] world '" + f.id() + "' threw: " + t);
+                        Draw.forceSaneState();
                     }
                 }
             }

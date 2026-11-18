@@ -11,34 +11,47 @@ import org.lwjgl.opengl.GL11;
 /**
  * The drawing primitives every feature shares.
  *
- * All of it is a thin, correct wrapper over GlStateManager + Tessellator: the
- * ordering of state changes is what breaks visuals in 1.8.9 (a leaked depth mask
- * makes the whole HUD vanish), so it is written once here rather than per feature.
+ * The state discipline here is the whole point. In 1.8.9 one leftover GL state breaks
+ * everything drawn after it — texture sampling left off turns the entire interface
+ * white, a leaked depth mask hides the world, a stuck colour tints all text. And an
+ * exception thrown mid-draw leaves exactly that, because the cleanup never runs.
+ *
+ * So every method restores what it changed, and {@link #forceSaneState()} exists for
+ * the case where a draw threw and the normal restore was skipped.
+ *
+ * Screen and world drawing are strictly separated. A rect drawn while the 3D
+ * perspective matrix is still bound is not a small overlay — it is a giant quad out in
+ * the world, which is what "the screen went white" actually was.
  */
 public final class Draw {
 
     private Draw() {
     }
 
-    /** A line box between two corners, drawn in the current GL space. */
+    // ---------------------------------------------------------------- world space
+
+    /** A line box between two corners, in camera-relative coordinates. */
     public static void box(double x1, double y1, double z1,
                            double x2, double y2, double z2,
                            float r, float g, float b, float a, float width) {
         GlStateManager.pushMatrix();
         GlStateManager.disableTexture2D();
         GlStateManager.disableLighting();
+        GlStateManager.disableCull();
         GlStateManager.enableBlend();
-        GlStateManager.tryBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0);
+        GlStateManager.tryBlendFuncSeparate(
+                GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ZERO);
         GlStateManager.disableDepth();
         GlStateManager.depthMask(false);
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
 
         GL11.glLineWidth(width);
         Tessellator tess = Tessellator.getInstance();
         WorldRenderer wr = tess.getWorldRenderer();
         wr.begin(GL11.GL_LINES, DefaultVertexFormats.POSITION_COLOR);
 
-        // 12 edges. Written out rather than looped over a corner array: the corner
-        // order is the thing that is easy to get wrong and hard to see.
+        // 12 edges, written out: corner order is the part that is easy to get wrong and
+        // hard to spot once you have.
         edge(wr, x1, y1, z1, x2, y1, z1, r, g, b, a);
         edge(wr, x1, y1, z2, x2, y1, z2, r, g, b, a);
         edge(wr, x1, y2, z1, x2, y2, z1, r, g, b, a);
@@ -57,11 +70,13 @@ public final class Draw {
         tess.draw();
 
         GL11.glLineWidth(1.0F);
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
         GlStateManager.depthMask(true);
         GlStateManager.enableDepth();
-        GlStateManager.disableBlend();
+        GlStateManager.enableCull();
         GlStateManager.enableLighting();
         GlStateManager.enableTexture2D();
+        GlStateManager.disableBlend();
         GlStateManager.popMatrix();
     }
 
@@ -72,13 +87,7 @@ public final class Draw {
         wr.pos(x2, y2, z2).color(r, g, b, a).endVertex();
     }
 
-    /**
-     * Text in world space, always facing the camera.
-     *
-     * The camera position must already have been subtracted from (x, y, z), and this
-     * must be called inside a matrix pushed by the caller so a feature cannot leak
-     * its transform into the next one.
-     */
+    /** Text in world space, always facing the camera. Coordinates are camera-relative. */
     public static void text3d(String text, double x, double y, double z, float scale,
                               int colour, RenderContext ctx) {
         FontRenderer font = Minecraft.getMinecraft().fontRendererObj;
@@ -87,45 +96,62 @@ public final class Draw {
         }
         GlStateManager.pushMatrix();
         GlStateManager.translate(x, y, z);
-        // Billboard on both axes, or the text lies flat on the ground and is
-        // unreadable unless you are directly above it.
+        // Billboard on both axes, or the text lies flat on the ground and is unreadable
+        // unless you happen to be directly above it.
         GlStateManager.rotate(-ctx.viewY, 0.0F, 1.0F, 0.0F);
         GlStateManager.rotate(ctx.viewX, 1.0F, 0.0F, 0.0F);
         GlStateManager.scale(-scale, -scale, scale);
         GlStateManager.disableDepth();
         GlStateManager.depthMask(false);
+        GlStateManager.enableTexture2D();
+        GlStateManager.enableBlend();
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
 
         int width = font.getStringWidth(text);
         font.drawStringWithShadow(text, -width / 2, 0, colour);
 
-        GlStateManager.depthMask(true);
-        GlStateManager.enableDepth();
-        GlStateManager.popMatrix();
-    }
-
-    /** Set up an orthographic overlay pass in screen space. */
-    public static void beginOverlay() {
-        GlStateManager.pushMatrix();
-        GlStateManager.enableBlend();
-        GlStateManager.tryBlendFuncSeparate(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, 1, 0);
-        GlStateManager.disableDepth();
-        GlStateManager.depthMask(false);
-    }
-
-    public static void endOverlay() {
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
         GlStateManager.depthMask(true);
         GlStateManager.enableDepth();
         GlStateManager.disableBlend();
         GlStateManager.popMatrix();
     }
 
-    /** A filled rectangle in screen coordinates. */
-    public static void rect(int x, int y, int w, int h, int argb) {
+    // ------------------------------------------------------------- screen space
+
+    /**
+     * Prepares an orthographic overlay.
+     *
+     * Called from the HUD pass, where Minecraft has already set up the 2D projection, so
+     * this only has to fix the states the drawing below will disturb.
+     */
+    public static void beginGui() {
+        GlStateManager.pushMatrix();
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+        GlStateManager.enableBlend();
+        GlStateManager.tryBlendFuncSeparate(
+                GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA, GL11.GL_ONE, GL11.GL_ZERO);
+        GlStateManager.disableDepth();
+        GlStateManager.depthMask(false);
+    }
+
+    public static void endGui() {
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+        GlStateManager.depthMask(true);
+        GlStateManager.enableDepth();
+        GlStateManager.disableBlend();
+        GlStateManager.enableTexture2D();
+        GlStateManager.popMatrix();
+    }
+
+    /** A filled rectangle in scaled-screen pixels. Call inside beginGui/endGui. */
+    public static void rect(float x, float y, float w, float h, int argb) {
         float a = (argb >>> 24 & 255) / 255.0F;
         float r = (argb >> 16 & 255) / 255.0F;
         float g = (argb >> 8 & 255) / 255.0F;
         float b = (argb & 255) / 255.0F;
 
+        GlStateManager.disableTexture2D();
         Tessellator tess = Tessellator.getInstance();
         WorldRenderer wr = tess.getWorldRenderer();
         wr.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR);
@@ -134,13 +160,38 @@ public final class Draw {
         wr.pos(x + w, y, 0).color(r, g, b, a).endVertex();
         wr.pos(x, y, 0).color(r, g, b, a).endVertex();
         tess.draw();
+        GlStateManager.enableTexture2D();
+        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
     }
 
-    /** Thin border, four rectangles so it works at any size. */
-    public static void outline(int x, int y, int w, int h, int argb) {
+    /** A one-pixel border: four rects, so it is correct at any size. */
+    public static void outline(float x, float y, float w, float h, int argb) {
         rect(x, y, w, 1, argb);
         rect(x, y + h - 1, w, 1, argb);
         rect(x, y, 1, h, argb);
         rect(x + w - 1, y, 1, h, argb);
+    }
+
+    /**
+     * Hard reset to the state the vanilla HUD expects.
+     *
+     * Called after a caught exception: a throw in the middle of a draw skips its own
+     * cleanup, and the result is the entire interface rendering white — which looks like
+     * a graphics driver fault rather than a mod fault.
+     */
+    public static void forceSaneState() {
+        try {
+            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+            GlStateManager.depthMask(true);
+            GlStateManager.enableDepth();
+            GlStateManager.enableCull();
+            GlStateManager.enableLighting();
+            GlStateManager.enableTexture2D();
+            GlStateManager.disableBlend();
+            GlStateManager.disableFog();
+            GL11.glLineWidth(1.0F);
+        } catch (Throwable ignored) {
+            // Nothing left to try; the next frame redraws from scratch.
+        }
     }
 }

@@ -4,45 +4,51 @@ import com.mohamed.presight.feature.Feature;
 import com.mohamed.presight.render.Draw;
 import com.mohamed.presight.render.Projection;
 import com.mohamed.presight.render.RenderContext;
+import com.mohamed.presight.render.ScreenContext;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.gui.ScaledResolution;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.RenderHelper;
 import net.minecraft.client.renderer.entity.RenderItem;
-import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import org.lwjgl.input.Keyboard;
-import org.lwjgl.opengl.GL11;
 
 import java.util.List;
 
 /**
- * Shows a player's visible gear beside their box.
+ * Shows a player's visible gear in a panel beside their box.
  *
- * Which player: whoever you are looking at, and if you are looking at nobody, the
- * nearest one — so pressing Y always does something instead of silently nothing.
+ * The work is split across the two passes on purpose. Drawing screen-space content
+ * from the world pass is wrong twice: the 3D perspective matrix is still bound, so a
+ * "small panel" becomes a giant quad out in the world — that is what made the screen
+ * go white — and the projection needed to find where a player is on screen only works
+ * while the world matrices are live.
  *
- * What it shows: a 2D inventory-style panel drawn where the player is on screen,
- * with each item rendered by the game's own RenderItem so a diamond sword looks
- * like a diamond sword and a stack of 64 shows its count. Only the slots a client
- * is actually told about exist: held item and the four armour slots.
+ * So the world pass picks the target, draws the box, and computes the screen position;
+ * the HUD pass draws the panel with the 2D projection Minecraft has already set up.
  */
 public class GearViewFeature implements Feature {
 
     public static final String ID = "gear_view";
 
-    private static final int CELL = 18;          // icon cell, the same 18px the inventory uses
+    private static final int CELL = 18;      // icon cell, the same 18px the inventory uses
     private static final int PAD = 4;
     private static final int BG = 0xC8101014;
     private static final int BORDER = 0xFF3CD07A;
+    private static final int LABEL = 0xFF9BFF6B;
 
-    /** The player we last drew for, so the key and the renderer agree. */
-    private EntityPlayer target;
+    /** Panel placement, computed in the world pass and read by the HUD pass. */
+    private int screenX = -1;
+    private int screenY = -1;
+    private int panelW;
+    private int panelH;
+    private String name;
+    private ItemStack[] icons;
 
     @Override
     public String id() {
@@ -62,9 +68,14 @@ public class GearViewFeature implements Feature {
     @Override
     public void onToggle(boolean enabled) {
         if (!enabled) {
-            target = null;
+            screenX = -1;
+            screenY = -1;
+            name = null;
+            icons = null;
         }
     }
+
+    // ----------------------------------------------------------------- world pass
 
     @Override
     public void renderWorld(RenderContext ctx) {
@@ -72,70 +83,94 @@ public class GearViewFeature implements Feature {
         if (mc.theWorld == null || mc.thePlayer == null) {
             return;
         }
-        target = pickTarget(mc);
+
+        EntityPlayer target = pickTarget(mc);
         if (target == null) {
+            screenX = -1;
             return;
         }
+
+        // The box belongs to the 3D pass; it is the only thing drawn here.
+        double half = target.width / 2.0D;
+        Draw.box(ctx.relX(target) - half, ctx.relY(target), ctx.relZ(target) - half,
+                 ctx.relX(target) + half, ctx.relY(target) + target.height, ctx.relZ(target) + half,
+                 0.23F, 0.82F, 0.48F, 1.0F, 2.0F);
 
         GearSnapshot gear = GearSnapshot.of(target);
         List<ItemStack> items = gear.presentItems();
 
-        int cols = Math.max(1, items.size());
-        int panelW = PAD * 2 + cols * CELL;
-        int panelH = PAD * 2 + CELL + 10;
+        // Projected here, while the world matrices are current. gluProject reads the
+        // live matrices, so the same call in the HUD pass would project against the 2D
+        // projection and put the panel somewhere useless.
+        ScaledResolution res = new ScaledResolution(mc);
+        double[] screen = Projection.worldToScreen(
+                ctx.relX(target), ctx.relY(target) + target.height + 0.35D, ctx.relZ(target),
+                res.getScaledWidth(), res.getScaledHeight());
 
-        // Project the player's head to screen space. Doing it through Minecraft's own
-        // projection keeps the panel glued to the player when the camera moves, which
-        // a hand-rolled matrix multiply usually gets subtly wrong.
-        double[] screen = projectToScreen(mc, ctx, target);
         if (screen == null) {
+            screenX = -1;   // behind the camera; drawing it would put the panel anywhere
             return;
         }
-        int px = (int) screen[0];
-        int py = (int) screen[1] - panelH - 14;
 
-        ScaledResolution res = new ScaledResolution(mc);
-        px = Math.max(2, Math.min(px - panelW / 2, res.getScaledWidth() - panelW - 2));
-        py = Math.max(2, Math.min(py, res.getScaledHeight() - panelH - 2));
+        int cols = Math.max(1, items.size());
+        panelW = PAD * 2 + cols * CELL;
+        panelH = PAD * 2 + 10 + CELL;
 
-        // Overlay pass: switch to screen coordinates for the panel, draw the icons,
-        // then the label. The matrix is restored before the next entity is drawn.
-        GlStateManager.pushMatrix();
-        GlStateManager.translate(0, 0, 300);          // above the world and the HUD
-        GlStateManager.disableDepth();
-        GlStateManager.depthMask(false);
+        int px = (int) screen[0] - panelW / 2;
+        int py = (int) screen[1] - panelH - 6;
+        screenX = Math.max(2, Math.min(px, res.getScaledWidth() - panelW - 2));
+        screenY = Math.max(2, Math.min(py, res.getScaledHeight() - panelH - 2));
 
-        Draw.rect(px, py, panelW, panelH, BG);
-        Draw.outline(px, py, panelW, panelH, BORDER);
-
-        FontRenderer font = mc.fontRendererObj;
-        font.drawStringWithShadow(gear.playerName, px + PAD, py + PAD, 0xFF9BFF6B);
-
-        RenderHelper.enableGUIStandardItemLighting();
-        RenderItem ri = mc.getRenderItem();
-        int ix = px + PAD;
-        int iy = py + PAD + 11;
-        for (ItemStack stack : items) {
-            ri.renderItemAndEffectIntoGUI(stack, ix, iy);
-            ri.renderItemOverlayIntoGUI(font, stack, ix, iy, null);
-            ix += CELL;
-        }
-        RenderHelper.disableStandardItemLighting();
-        GlStateManager.enableDepth();
-        GlStateManager.depthMask(true);
-        GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
-        GlStateManager.popMatrix();
-
-        // And the box, so the panel is obviously attached to a person.
-        double half = target.width / 2.0D;
-        Draw.box(ctx.relX(target) - half, ctx.relY(target), ctx.relZ(target) - half,
-                 ctx.relX(target) + half, ctx.relY(target) + target.height, ctx.relZ(target) + half,
-                 0.23F, 0.82F, 0.48F, 1.0F, 1.5F);
+        name = gear.playerName;
+        icons = items.toArray(new ItemStack[0]);
     }
 
+    // ------------------------------------------------------------------- HUD pass
+
+    @Override
+    public void renderScreen(ScreenContext ctx) {
+        if (screenX < 0 || icons == null || icons.length == 0) {
+            return;
+        }
+
+        Draw.beginGui();
+        try {
+            Draw.rect(screenX, screenY, panelW, panelH, BG);
+            Draw.outline(screenX, screenY, panelW, panelH, BORDER);
+
+            FontRenderer font = ctx.font;
+            if (name != null) {
+                font.drawStringWithShadow(name, screenX + PAD, screenY + PAD, LABEL);
+            }
+
+            // The game's own item renderer, so a diamond sword looks like a diamond sword
+            // and a stack of 64 shows its count — the same call the inventory makes.
+            RenderHelper.enableGUIStandardItemLighting();
+            RenderItem ri = Minecraft.getMinecraft().getRenderItem();
+            int ix = screenX + PAD;
+            int iy = screenY + PAD + 10;
+            for (ItemStack stack : icons) {
+                if (stack == null) {
+                    continue;
+                }
+                ri.renderItemAndEffectIntoGUI(stack, ix, iy);
+                ri.renderItemOverlayIntoGUI(font, stack, ix, iy, null);
+                ix += CELL;
+            }
+            RenderHelper.disableStandardItemLighting();
+            GlStateManager.color(1.0F, 1.0F, 1.0F, 1.0F);
+        } finally {
+            // Restores what the item renderer and the rects disturbed. A leak here is
+            // what leaves the whole HUD tinted or textureless.
+            Draw.endGui();
+        }
+    }
+
+    // -------------------------------------------------------------------- target
+
     /**
-     * The player being looked at, else the nearest one within reach of the ray.
-     * Returns null when the world has no other players.
+     * The player under the crosshair, else the nearest one along the view ray.
+     * Null when nobody qualifies.
      */
     private static EntityPlayer pickTarget(Minecraft mc) {
         MovingObjectPosition hit = mc.objectMouseOver;
@@ -145,8 +180,6 @@ public class GearViewFeature implements Feature {
             return (EntityPlayer) hit.entityHit;
         }
 
-        // Nothing under the crosshair: ray-cast a generous distance so the feature is
-        // useful in a fight where you are not precisely aiming at anyone.
         Vec3 eye = mc.thePlayer.getPositionEyes(1.0F);
         Vec3 look = mc.thePlayer.getLook(1.0F);
         Vec3 end = eye.addVector(look.xCoord * 48.0D, look.yCoord * 48.0D, look.zCoord * 48.0D);
@@ -156,11 +189,11 @@ public class GearViewFeature implements Feature {
 
         EntityPlayer best = null;
         double bestDist = Double.MAX_VALUE;
-        for (Entity e : mc.theWorld.getEntitiesWithinAABB(EntityPlayer.class, area)) {
-            if (e == mc.thePlayer || !(e instanceof EntityPlayer)) {
+        for (Object o : mc.theWorld.getEntitiesWithinAABB(EntityPlayer.class, area)) {
+            if (!(o instanceof EntityPlayer) || o == mc.thePlayer) {
                 continue;
             }
-            EntityPlayer p = (EntityPlayer) e;
+            EntityPlayer p = (EntityPlayer) o;
             AxisAlignedBB bb = p.getEntityBoundingBox().expand(0.3D, 0.3D, 0.3D);
             MovingObjectPosition mop = bb.calculateIntercept(eye, end);
             if (mop == null) {
@@ -173,15 +206,5 @@ public class GearViewFeature implements Feature {
             }
         }
         return best;
-    }
-
-    /**
-     * Where the player's head lands on the (scaled) screen, or null when behind the
-     * camera. Projection uses Minecraft's live matrices, so it matches the world pass.
-     */
-    private static double[] projectToScreen(Minecraft mc, RenderContext ctx, Entity e) {
-        ScaledResolution res = new ScaledResolution(mc);
-        return Projection.worldToScreen(ctx.relX(e), ctx.relY(e) + e.height + 0.2D,
-                ctx.relZ(e), res.getScaledWidth(), res.getScaledHeight());
     }
 }
