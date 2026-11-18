@@ -88,11 +88,16 @@ public class ClickMultiplierFeature implements Feature {
     public void onKeyPressed(boolean shift) {
         Minecraft mc = Minecraft.getMinecraft();
         if (shift) {
-            active = false;
-            System.out.println("[PreSight] click_multiplier OFF (shift+i)");
+            // A switch, not an off button. Turning it off with Shift+I and then having no way
+            // back on except reopening the screen is a dead end — the owner hit exactly that.
+            active = !active;
+            System.out.println("[PreSight] click_multiplier " + (active ? "ON" : "OFF")
+                    + " (shift+i) " + button + " x" + count);
             if (mc.thePlayer != null) {
                 mc.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText(
-                        "\u00a78[\u00a7bPreSight\u00a78] \u00a77Click Multiplier: \u00a7cOFF"));
+                        "\u00a78[\u00a7bPreSight\u00a78] \u00a77Click Multiplier: "
+                                + (active ? "\u00a7aON " + button + " x" + count
+                                          : "\u00a7cOFF")));
             }
             return;
         }
