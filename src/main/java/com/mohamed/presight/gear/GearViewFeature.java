@@ -1,7 +1,6 @@
 package com.mohamed.presight.gear;
 
 import com.mohamed.presight.feature.Feature;
-import com.mohamed.presight.render.Draw;
 import com.mohamed.presight.render.Projection;
 import com.mohamed.presight.render.RenderContext;
 import com.mohamed.presight.render.ScreenContext;
@@ -23,14 +22,16 @@ import java.util.List;
 /**
  * Shows a player's visible gear in a panel beside their box.
  *
- * The work is split across the two passes on purpose. Drawing screen-space content
- * from the world pass is wrong twice: the 3D perspective matrix is still bound, so a
- * "small panel" becomes a giant quad out in the world — that is what made the screen
- * go white — and the projection needed to find where a player is on screen only works
- * while the world matrices are live.
+ * Split across both passes on purpose. Screen-space drawing from the world pass is wrong
+ * twice: the 3D perspective matrix is still bound there, so a "small panel" becomes a giant
+ * quad out in the world, and the projection needed to find where a player is on screen only
+ * works while the world matrices are live.
  *
- * So the world pass picks the target, draws the box, and computes the screen position;
- * the HUD pass draws the panel with the 2D projection Minecraft has already set up.
+ * Target selection is cached. Ray-casting against every player every frame is what made the
+ * game stutter whenever the cursor crossed a player: the bounding-box query allocates a box
+ * per candidate and it ran sixty times a second over a long cone. The crosshair result is
+ * used when it exists — Minecraft already computed it for this frame — and the expensive
+ * scan runs at most once every SCAN_INTERVAL ticks.
  */
 public class GearViewFeature implements Feature {
 
@@ -38,9 +39,14 @@ public class GearViewFeature implements Feature {
 
     private static final int CELL = 18;      // icon cell, the same 18px the inventory uses
     private static final int PAD = 4;
+    private static final int MIN_COLS = 2;   // stops the panel collapsing when empty
     private static final int BG = 0xC8101014;
     private static final int BORDER = 0xFF3CD07A;
     private static final int LABEL = 0xFF9BFF6B;
+    private static final int MUTED = 0xFF808080;
+
+    /** Re-run the expensive scan at most this often, in client ticks. */
+    private static final int SCAN_INTERVAL = 6;
 
     /** Panel placement, computed in the world pass and read by the HUD pass. */
     private int screenX = -1;
@@ -49,6 +55,10 @@ public class GearViewFeature implements Feature {
     private int panelH;
     private String name;
     private ItemStack[] icons;
+
+    /** Cached scan result and the tick it was taken. */
+    private EntityPlayer cachedTarget;
+    private int lastScanTick;
 
     @Override
     public String id() {
@@ -72,6 +82,7 @@ public class GearViewFeature implements Feature {
             screenY = -1;
             name = null;
             icons = null;
+            cachedTarget = null;
         }
     }
 
@@ -85,12 +96,11 @@ public class GearViewFeature implements Feature {
         }
 
         EntityPlayer target = pickTarget(mc);
-        if (target == null) {
+        if (target == null || target.isDead) {
             screenX = -1;
             return;
         }
 
-        // The box belongs to the 3D pass; it is the only thing drawn here.
         double half = target.width / 2.0D;
         ctx.boxes.colour(0.23F, 0.82F, 0.48F, 1.0F);
         ctx.boxes.addBox(ctx.relX(target) - half, ctx.relY(target), ctx.relZ(target) - half,
@@ -100,22 +110,20 @@ public class GearViewFeature implements Feature {
         GearSnapshot gear = GearSnapshot.of(target);
         List<ItemStack> items = gear.presentItems();
 
-        // Projected here, while the world matrices are current. gluProject reads the
-        // live matrices, so the same call in the HUD pass would project against the 2D
-        // projection and put the panel somewhere useless.
+        // Projected here, while the world matrices are current.
         ScaledResolution res = new ScaledResolution(mc);
         double[] screen = Projection.worldToScreen(
                 ctx.relX(target), ctx.relY(target) + target.height + 0.35D, ctx.relZ(target),
                 res.getScaledWidth(), res.getScaledHeight());
 
         if (screen == null) {
-            screenX = -1;   // behind the camera; drawing it would put the panel anywhere
+            screenX = -1;   // behind the camera
             return;
         }
 
-        int cols = Math.max(1, items.size());
+        int cols = Math.max(MIN_COLS, items.size());
         panelW = PAD * 2 + cols * CELL;
-        panelH = PAD * 2 + 10 + CELL;
+        panelH = PAD * 2 + 11 + CELL;
 
         int px = (int) screen[0] - panelW / 2;
         int py = (int) screen[1] - panelH - 6;
@@ -134,23 +142,23 @@ public class GearViewFeature implements Feature {
             return;
         }
 
-        // The panel is drawn even when the player is carrying nothing: "no gear" is a
-        // real answer, and an invisible panel reads as the feature being broken. Only
-        // the icon row is skipped.
+        // Drawn even when the target carries nothing: "no gear" is a real answer, and an
+        // invisible panel reads as the feature being broken.
         ctx.rect(screenX, screenY, panelW, panelH, BG);
         ctx.outline(screenX, screenY, panelW, panelH, BORDER);
         ctx.text(name, screenX + PAD, screenY + PAD, LABEL);
 
         if (icons == null || icons.length == 0) {
+            ctx.text("no gear", screenX + PAD, screenY + PAD + 11, MUTED);
             return;
         }
 
-        // The game's own item renderer, so a diamond sword looks like a diamond sword and
-        // a stack of 64 shows its count — the same call the inventory makes.
+        // The game's own item renderer, so a diamond sword looks like a diamond sword and a
+        // stack of 64 shows its count — the same call the inventory makes.
         RenderHelper.enableGUIStandardItemLighting();
         RenderItem ri = Minecraft.getMinecraft().getRenderItem();
         int ix = screenX + PAD;
-        int iy = screenY + PAD + 10;
+        int iy = screenY + PAD + 11;
         for (ItemStack stack : icons) {
             if (stack == null) {
                 continue;
@@ -170,23 +178,53 @@ public class GearViewFeature implements Feature {
     // -------------------------------------------------------------------- target
 
     /**
-     * The player under the crosshair, else the nearest one along the view ray.
-     * Null when nobody qualifies.
+     * The player being looked at, or null.
+     *
+     * Cheap path first: Minecraft already ray-traced the crosshair for this frame, so an
+     * entity hit there costs nothing to use. The expensive scan is throttled and cached,
+     * because running it every frame is exactly what caused the stutter when the cursor was
+     * near a player.
      */
-    private static EntityPlayer pickTarget(Minecraft mc) {
+    private EntityPlayer pickTarget(Minecraft mc) {
         MovingObjectPosition hit = mc.objectMouseOver;
         if (hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY
                 && hit.entityHit instanceof EntityPlayer
                 && hit.entityHit != mc.thePlayer) {
-            return (EntityPlayer) hit.entityHit;
+            cachedTarget = (EntityPlayer) hit.entityHit;
+            lastScanTick = mc.thePlayer.ticksExisted;
+            return cachedTarget;
         }
 
+        int now = mc.thePlayer.ticksExisted;
+        boolean stale = cachedTarget == null
+                || cachedTarget.isDead
+                || !mc.theWorld.playerEntities.contains(cachedTarget)
+                || now - lastScanTick >= SCAN_INTERVAL;
+
+        if (!stale) {
+            return cachedTarget;
+        }
+
+        lastScanTick = now;
+        cachedTarget = scanForTarget(mc);
+        return cachedTarget;
+    }
+
+    /** The throttled path: the nearest player whose hitbox the view ray crosses. */
+    private static EntityPlayer scanForTarget(Minecraft mc) {
         Vec3 eye = mc.thePlayer.getPositionEyes(1.0F);
         Vec3 look = mc.thePlayer.getLook(1.0F);
-        Vec3 end = eye.addVector(look.xCoord * 48.0D, look.yCoord * 48.0D, look.zCoord * 48.0D);
-        AxisAlignedBB area = mc.thePlayer.getEntityBoundingBox()
-                .addCoord(look.xCoord * 48.0D, look.yCoord * 48.0D, look.zCoord * 48.0D)
-                .expand(4.0D, 4.0D, 4.0D);
+        Vec3 end = eye.addVector(look.xCoord * 32.0D, look.yCoord * 32.0D, look.zCoord * 32.0D);
+
+        // A tight box around the ray segment, rather than a 48-block cube: fewer candidates
+        // to test, and no box built for entities nowhere near the crosshair.
+        AxisAlignedBB area = new AxisAlignedBB(
+                Math.min(eye.xCoord, end.xCoord) - 2.0D,
+                Math.min(eye.yCoord, end.yCoord) - 2.0D,
+                Math.min(eye.zCoord, end.zCoord) - 2.0D,
+                Math.max(eye.xCoord, end.xCoord) + 2.0D,
+                Math.max(eye.yCoord, end.yCoord) + 2.0D,
+                Math.max(eye.zCoord, end.zCoord) + 2.0D);
 
         EntityPlayer best = null;
         double bestDist = Double.MAX_VALUE;

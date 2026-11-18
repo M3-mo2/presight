@@ -41,7 +41,7 @@ public final class Draw {
 
     /** Push a matrix, remembered so it can be unwound if the draw throws. */
     private static void push() {
-        push();
+        GlStateManager.pushMatrix();
         depth++;
     }
 
@@ -50,7 +50,7 @@ public final class Draw {
         if (depth <= 0) {
             return;
         }
-        pop();
+        GlStateManager.popMatrix();
         depth--;
     }
 
