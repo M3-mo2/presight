@@ -78,7 +78,8 @@ public class WorldRenderHandler {
             } catch (Throwable t) {
                 // A throw mid-draw skips that draw's cleanup, and a leftover matrix or
                 // texture state breaks every pixel drawn afterwards.
-                System.err.println("[PreSight] world '" + f.id() + "' threw: " + t);
+                System.err.println("[PreSight] world '" + f.id() + "' threw:");
+                t.printStackTrace();   // the message alone hides the frame that mattered
                 Draw.forceSaneState();
             }
         }
