@@ -54,6 +54,29 @@ public final class FeatureRegistry {
         return next;
     }
 
+    /**
+     * Tick every enabled feature once.
+     *
+     * One loop here rather than a listener per feature: Forge resolves handlers by
+     * reflection, and two features registered on the wrong bus both look like "the feature
+     * does nothing". This cannot be registered on the wrong bus, because it happens inside
+     * the one handler that already works.
+     */
+    public static void tickAll(com.mohamed.presight.core.TickContext ctx) {
+        for (Feature f : BY_ID.values()) {
+            if (!Boolean.TRUE.equals(ENABLED.get(f.id()))) {
+                continue;
+            }
+            try {
+                f.tick(ctx);
+            } catch (Throwable t) {
+                // One broken tool must not stop the others, and must not kill the game loop.
+                System.err.println("[PreSight] tick '" + f.id() + "' threw:");
+                t.printStackTrace();
+            }
+        }
+    }
+
     public static void setEnabled(String id, boolean enabled) {
         if (!BY_ID.containsKey(id)) {
             return;

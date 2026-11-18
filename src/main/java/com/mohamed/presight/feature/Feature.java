@@ -30,6 +30,16 @@ public interface Feature {
     default void onToggle(boolean enabled) {
     }
 
+    /**
+     * Called once per client tick, while the feature is enabled.
+     *
+     * Not a render hook: this is where a feature reacts to state that changes between
+     * frames — footing, sneaking, a key held down — rather than drawing. Rendering runs at
+     * frame rate and would run the same decision sixty times a second.
+     */
+    default void tick(com.mohamed.presight.core.TickContext ctx) {
+    }
+
     // ---- rendering hooks, all optional ----------------------------------
 
     /** Draw in world space, after the world, before the HUD. */

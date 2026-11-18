@@ -44,6 +44,9 @@ public final class PreSightClient {
     public static void init() {
         FeatureRegistry.register(new PlayerEspFeature());
         FeatureRegistry.register(new GearViewFeature());
+        // Registered here and nowhere else: the keybinding, the config entry and the tick
+        // loop all read the registry, so a new tool is one line.
+        FeatureRegistry.register(new com.mohamed.presight.safety.BuildAssistantFeature());
         Keybinds.registerAll();
         // After registration: the stored state and keys are applied onto the features and
         // bindings that now exist.
@@ -110,6 +113,17 @@ public final class PreSightClient {
             } catch (Throwable t) {
                 // A dead key must not take down the game loop.
                 System.err.println("[PreSight] key poll failed: " + t);
+            }
+            try {
+                // Same tick, same bus: the tool that reacts to footing must run at tick rate,
+                // not frame rate, or it decides sixty times a second and reacts late once.
+                com.mohamed.presight.core.TickContext ctx =
+                        com.mohamed.presight.core.TickContext.current();
+                if (ctx != null) {
+                    FeatureRegistry.tickAll(ctx);
+                }
+            } catch (Throwable t) {
+                System.err.println("[PreSight] feature tick failed: " + t);
             }
         }
     }
