@@ -1,120 +1,138 @@
-"""Resolve every method the mod calls against the real jars.
+"""Resolve every external method a mod jar calls against the real jars.
 
-The SRG check answers "does this symbol exist in this version" but only for symbols
-that are *named in* the classes. It cannot see a call to a method that never existed —
-for that you have to look at the constant pool and resolve each Methodref against the
-actual class files.
+This is the check that predicts NoSuchMethodError. A symbol-existence scan cannot
+replace it: a call to a method that never existed is not in the constant pool of a
+class that never compiled against it, so the scan is silent about exactly the
+failure it is usually credited with catching.
 
-This is the check that catches a `NoSuchMethodError`, which is what a crash at
-start-up usually is: the class loads, the verifier resolves the call, and the game
-dies before a world appears.
+javap prints a Methodref as:
 
-Usage:  python3 check_calls.py <mod.jar> <cp.jar>[:<cp.jar>...]
+    // Method net/minecraft/client/Minecraft.func_71410_x:()Lnet/minecraft/...;
+
+Note the class and the method are joined by a DOT, while packages use SLASHES.
+Splitting on the last '/' therefore yields the package, not the class, and every
+lookup misses -- which silently reports "0 references checked, PASS". Split on the
+last '/' first, then on the last '.' of the remainder.
+
+Usage:  python3 check_calls.py <mod.jar> <cp1.jar>:<cp2.jar>:...
 """
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
 
 
-def methods_of(jar: str, cls: str) -> set[str] | None:
-    """name+descriptor of every method on a class, or None if the class is absent."""
+def members_of(jar: str, cls: str):
+    """{name: {descriptors}} for a class, or None when the class is not there."""
     try:
         out = subprocess.run(
             ["javap", "-p", "-s", "-cp", jar, cls.replace("/", ".")],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=90)
     except Exception:
         return None
     if out.returncode != 0 or not out.stdout.strip():
         return None
-    found, pending = set(), False
-    for line in out.stdout.split("\n"):
-        if "descriptor:" in line:
-            desc = line.split("descriptor:", 1)[1].strip()
+
+    result = {}
+    pending = None
+    for raw in out.stdout.split("\n"):
+        line = raw.strip()
+        if line.startswith("descriptor:"):
             if pending:
-                found.add(desc)
-                pending = False
-        elif "(" in line and ")" in line and not line.strip().startswith("descriptor"):
-            pending = True
-    return found
+                result.setdefault(pending, set()).add(line.split("descriptor:", 1)[1].strip())
+                pending = None
+            continue
+        # A member signature line looks like: `public void foo(int);`
+        if "(" in line and line.endswith(";") and not line.startswith("//"):
+            head = line.split("(", 1)[0]
+            parts = head.split()
+            name = parts[-1] if parts else None
+            # A constructor prints as `pkg.Cls(...)`; keep just the simple name.
+            if name and "." in name:
+                name = name.rsplit(".", 1)[1]
+            pending = name
+        elif not line:
+            pending = None
+    return result
 
 
-def class_names(jar: str) -> set[str]:
-    with zipfile.ZipFile(jar) as z:
-        return {n[:-6] for n in z.namelist() if n.endswith(".class")}
+def class_names(jar):
+    try:
+        with zipfile.ZipFile(jar) as z:
+            return {n[:-6] for n in z.namelist() if n.endswith(".class")}
+    except zipfile.BadZipFile:
+        return set()
 
 
-def main() -> int:
+def main():
     if len(sys.argv) != 3:
         print(__doc__)
         return 2
-    mod, cp = Path(sys.argv[1]), sys.argv[2]
+    mod = sys.argv[1]
+    cp_parts = sys.argv[2].split(":")
 
-    # One merged classpath entry list, plus a set of every class available anywhere.
-    cp_parts = cp.split(":")
-    available: dict[str, str] = {}
+    available = {}
     for part in cp_parts:
-        try:
-            for c in class_names(part):
-                available.setdefault(c, part)
-        except zipfile.BadZipFile:
-            pass
-    print(f"  {len(available)} classes available across {len(cp_parts)} jars")
+        for c in class_names(part):
+            available.setdefault(c, part)
+    print("  %d classes across %d jars" % (len(available), len(cp_parts)))
 
-    mine = class_names(str(mod))
-    print(f"  mod has {len(mine)} classes")
+    mine = class_names(mod)
+    print("  mod has %d classes" % len(mine))
 
-    problems, checked = [], 0
+    checked, problems = 0, []
     for cls in sorted(mine):
-        out = subprocess.run(["javap", "-c", "-p", "-cp", f"{mod}:{cp}", cls.replace("/", ".")],
-                             capture_output=True, text=True, timeout=60)
+        out = subprocess.run(
+            ["javap", "-c", "-p", "-cp", ":".join([mod] + cp_parts), cls.replace("/", ".")],
+            capture_output=True, text=True, timeout=90)
         if out.returncode != 0:
-            problems.append((cls, "unreadable", out.stderr.strip()[:120]))
+            problems.append((cls, "<class>", "not decompilable"))
             continue
 
         for line in out.stdout.split("\n"):
-            # Methodrefs appear as: // Method owner/name:(desc)ret
-            if "// Method " not in line and "// InterfaceMethod " not in line:
+            marker = None
+            if "// Method " in line:
+                marker = "// Method "
+            elif "// InterfaceMethod " in line:
+                marker = "// InterfaceMethod "
+            if not marker:
                 continue
-            ref = line.split("// ", 1)[1]
-            ref = ref.replace("Method ", "").replace("InterfaceMethod ", "").strip()
+            ref = line.split(marker, 1)[1].strip()
             if ":" not in ref:
                 continue
             target, sig = ref.split(":", 1)
             if "/" not in target:
                 continue
-            owner, name = target.rsplit("/", 1)
-            if owner.startswith("[") or owner in ("java/lang/Object",):
+            pkg, rest = target.rsplit("/", 1)
+            if "." not in rest:
                 continue
-            if owner not in available:
-                continue      # JDK class; not our business
-            if owner in mine:
-                continue      # our own class
+            owner = pkg + "/" + rest.rsplit(".", 1)[0]
+            name = rest.rsplit(".", 1)[1]
+
+            if owner.startswith("[") or owner not in available or owner in mine:
+                continue      # JDK, an array type, or our own class
 
             checked += 1
-            have = methods_of(available[owner], owner)
+            have = members_of(available[owner], owner)
             if have is None:
-                problems.append((cls, f"{owner}.{name}", "owner class not resolvable"))
-                continue
-            desc = sig.split(")")[0] + ")" if ")" in sig else ""
-            if not any(d.startswith(desc) for d in have):
-                problems.append((cls, f"{owner}.{name}", f"descriptor {sig} not found"))
+                problems.append((cls, "%s.%s" % (owner, name), "owner not resolvable"))
+            elif name not in have:
+                problems.append((cls, "%s.%s%s" % (owner, name, sig), "no such method on that class"))
 
-    print(f"  resolved {checked} external method references")
-
+    print("  resolved %d external method references" % checked)
+    if checked == 0:
+        print("  WARNING: zero references checked -- the parser is not matching, do not trust this pass")
+        return 1
     if not problems:
-        print("  PASS every external call resolves to a real method")
+        print("  PASS every external call resolves")
         return 0
 
+    print("  FAIL %d unresolved (deduped):" % len(problems))
     seen = set()
-    print(f"  FAIL {len(problems)} unresolved:")
     for cls, member, why in problems:
-        key = (member, why)
-        if key in seen:
+        if (member, why) in seen:
             continue
-        seen.add(key)
-        print(f"    {cls}")
-        print(f"      {member}  — {why}")
+        seen.add((member, why))
+        print("    %s\n      %s -- %s" % (cls, member, why))
     return 1
 
 

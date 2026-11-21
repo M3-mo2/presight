@@ -117,25 +117,52 @@ public class ClickMultiplierFeature implements Feature {
         return true;
     }
 
+    /**
+     * R is the plain switch. I still opens the control screen, and Shift+I still toggles, so
+     * nothing that worked before stopped working — R is the one to reach for mid-fight, where
+     * a Shift chord is a misclick waiting to happen.
+     */
+    @Override
+    public int toggleKey() {
+        return Keyboard.KEY_R;
+    }
+
+    @Override
+    public void onTogglePressed() {
+        toggleActive("r");
+    }
+
     @Override
     public void onKeyPressed(boolean shift) {
         Minecraft mc = Minecraft.getMinecraft();
         if (shift) {
             // A switch, not an off button. Turning it off with Shift+I and then having no way
             // back on except reopening the screen is a dead end — the owner hit exactly that.
-            active = !active;
-            System.out.println("[PreSight] click_multiplier " + (active ? "ON" : "OFF")
-                    + " (shift+i) " + button + " x" + count);
-            if (mc.thePlayer != null) {
-                mc.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText(
-                        "\u00a78[\u00a7bPreSight\u00a78] \u00a77Click Multiplier: "
-                                + (active ? "\u00a7aON " + button + " x" + count
-                                          : "\u00a7cOFF")));
-            }
+            toggleActive("shift+i");
             return;
         }
         if (mc.currentScreen == null) {
             mc.displayGuiScreen(new ClickMultiplierScreen(this));
+        }
+    }
+
+    /**
+     * Flips the multiplier and says so in both places.
+     *
+     * One implementation for every key that can switch it, so R and Shift+I can never drift
+     * apart — and the log names which key did it, which is how a "the key does nothing" report
+     * gets answered without a screenshot.
+     */
+    private void toggleActive(String source) {
+        Minecraft mc = Minecraft.getMinecraft();
+        active = !active;
+        System.out.println("[PreSight] click_multiplier " + (active ? "ON" : "OFF")
+                + " (" + source + ") " + button + " x" + count);
+        if (mc.thePlayer != null) {
+            mc.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText(
+                    "\u00a78[\u00a7bPreSight\u00a78] \u00a77Click Multiplier: "
+                            + (active ? "\u00a7aON " + button + " x" + count
+                                      : "\u00a7cOFF")));
         }
     }
 

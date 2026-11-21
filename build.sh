@@ -27,7 +27,7 @@ OUT="$ROOT/build"
 CLASSES="$OUT/classes"
 REOBF="$OUT/reobf"
 STAGE="$OUT/stage"
-JAR="$OUT/presight-1.14.1.jar"
+JAR="$OUT/presight-1.15.0.jar"
 
 rm -rf "$OUT"
 mkdir -p "$CLASSES" "$REOBF" "$STAGE"
@@ -60,6 +60,28 @@ echo "   $(basename "$JAR") $(stat -c%s "$JAR") bytes"
 echo
 echo "== verify =="
 if python3 "$ROOT/tools/verify_symbols.py" "$JAR" "$T/deobf.srg"; then
+    :
+else
+    echo "   FAILED — see above"
+    exit 1
+fi
+
+# The symbol scan only sees names that are present. These catch what it structurally cannot:
+# a call on the wrong class (compiles, then NoSuchMethodError), a method that calls itself
+# (StackOverflowError inside a catch that hides it), and unbalanced push/pop (GL 1283).
+if python3 "$ROOT/tools/check_ownership.py" "$JAR" "$T/readable.srg" "$T/mc-readable.jar"; then
+    :
+else
+    echo "   FAILED — see above"
+    exit 1
+fi
+if python3 "$ROOT/tools/check_selfrecursion.py" "$JAR"; then
+    :
+else
+    echo "   FAILED — see above"
+    exit 1
+fi
+if python3 "$ROOT/tools/audit_matrix.py" "$JAR"; then
     :
 else
     echo "   FAILED — see above"

@@ -42,6 +42,30 @@ public interface Feature {
     }
 
     /**
+     * An optional second key that always switches this feature on and off.
+     *
+     * Exists because one key cannot carry three meanings. The multiplier needs I to open its
+     * control screen and Shift+I to toggle, and the owner wants a plain, dedicated switch as
+     * well — reaching for Shift while fighting is not a control scheme. Returning 0 means the
+     * feature has no separate switch. The key is registered like any other, so it appears in
+     * Options -> Controls and can be rebound.
+     */
+    default int toggleKey() {
+        return 0;
+    }
+
+    /**
+     * Called on a press of {@link #toggleKey()}. Never called when that key is 0.
+     *
+     * Separate from {@link #onKeyPressed(boolean)} because this press has exactly one meaning:
+     * switch. A feature whose enabled state lives in the registry gets that for free through
+     * {@link com.mohamed.presight.feature.FeatureRegistry#toggle(String)}; one that keeps its own
+     * state overrides this.
+     */
+    default void onTogglePressed() {
+    }
+
+    /**
      * Called on a press of this feature's key, only when {@link #handlesKeyItself()}.
      *
      * @param shift whether either Shift was held, so one key can carry two meanings.

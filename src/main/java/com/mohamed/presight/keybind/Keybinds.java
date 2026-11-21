@@ -43,6 +43,14 @@ public final class Keybinds {
     private static final List<KeyBinding> BINDINGS = new ArrayList<>();
     private static final Map<KeyBinding, Feature> OWNER = new LinkedHashMap<>();
 
+    /**
+     * The optional second binding per feature: the key that only ever switches it.
+     *
+     * Kept in its own map so the main loop cannot double-fire when a feature has both a
+     * control key and a switch key, and so a feature without one costs nothing.
+     */
+    private static final Map<KeyBinding, Feature> TOGGLE_OWNER = new LinkedHashMap<>();
+
     /** Keys physically down on the previous tick, for edge detection. */
     private static final Set<Integer> HELD_LAST_TICK = new HashSet<>();
 
@@ -65,6 +73,19 @@ public final class Keybinds {
             }
             BINDINGS.add(kb);
             OWNER.put(kb, f);
+
+            if (f.toggleKey() > 0) {
+                KeyBinding tkb = new KeyBinding("key.presight." + f.id() + ".toggle",
+                        f.toggleKey(), CATEGORY);
+                try {
+                    ClientRegistry.registerKeyBinding(tkb);
+                } catch (Throwable t) {
+                    System.err.println("[PreSight] could not register the switch key for "
+                            + f.id() + ": " + t);
+                }
+                BINDINGS.add(tkb);
+                TOGGLE_OWNER.put(tkb, f);
+            }
         }
 
         for (KeyBinding kb : BINDINGS) {
@@ -112,6 +133,24 @@ public final class Keybinds {
                 }
             }
         }
+        // The switch keys. Same edge detection against the same set, so one press is one
+        // switch no matter how many bindings point at the key.
+        for (Map.Entry<KeyBinding, Feature> e : TOGGLE_OWNER.entrySet()) {
+            int code = e.getKey().getKeyCode();
+            if (code <= 0 || !Keyboard.isKeyDown(code)) {
+                continue;
+            }
+            heldNow.add(code);
+            if (!HELD_LAST_TICK.contains(code)) {
+                try {
+                    e.getValue().onTogglePressed();
+                } catch (Throwable t) {
+                    System.err.println("[PreSight] switch key for '" + e.getValue().id()
+                            + "' threw: " + t);
+                }
+            }
+        }
+
         HELD_LAST_TICK.clear();
         HELD_LAST_TICK.addAll(heldNow);
     }
